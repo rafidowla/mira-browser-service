@@ -21,6 +21,8 @@ import 'dotenv/config'
 import express, { Request, Response, NextFunction } from 'express'
 import type { TaskRequest, TaskResponse, AuditEntry, SessionStatus } from './types'
 import { DEFAULT_TIMING } from './lib/timing'
+import { contextManager } from './lib/context'
+import type { TimingConfig } from './lib/timing'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -134,8 +136,24 @@ app.get('/health', (_req: Request, res: Response): void => {
  * Purpose: (Stub) Initialise a browser context for the given profile.
  * Full implementation in Block 3.2.
  */
-app.post('/session/init', requireToken, (_req: Request, res: Response): void => {
-  res.json({ status: 'not_implemented' })
+app.post('/session/init', requireToken, (req: Request, res: Response): void => {
+  const { profile_id, timing_overrides } = req.body as {
+    profile_id: string
+    timing_overrides?: Partial<TimingConfig>
+  }
+  if (!profile_id) {
+    res.status(400).json({ error: 'Missing profile_id' })
+    return
+  }
+  contextManager
+    .initProfile(profile_id, timing_overrides)
+    .then((ctx) => {
+      res.json({ profile_id: ctx.profile_id, status: ctx.status, session_dir: ctx.session_dir })
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Init failed'
+      res.status(500).json({ error: message })
+    })
 })
 
 /**
@@ -144,10 +162,14 @@ app.post('/session/init', requireToken, (_req: Request, res: Response): void => 
  * Purpose: (Stub) Return the current lifecycle status of a browser session.
  * Full implementation in Block 3.2.
  */
-app.post('/session/status', requireToken, (_req: Request, res: Response): void => {
-  const _placeholder: Partial<SessionStatus> = {}
-  void _placeholder
-  res.json({ status: 'not_implemented' })
+app.post('/session/status', requireToken, (req: Request, res: Response): void => {
+  const { profile_id } = req.body as { profile_id: string }
+  if (!profile_id) {
+    res.status(400).json({ error: 'Missing profile_id' })
+    return
+  }
+  const status = contextManager.getStatus(profile_id)
+  res.json(status)
 })
 
 /**
@@ -174,7 +196,8 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
  */
 app.get('/audit', requireToken, (_req: Request, res: Response): void => {
   const entries: AuditEntry[] = []
-  res.json({ entries })
+  const active_profiles = contextManager.listProfiles()
+  res.json({ entries, active_profiles })
 })
 
 // ---------------------------------------------------------------------------

@@ -79,4 +79,8 @@ export interface SessionStatus {
   status: 'uninitialised' | 'active' | 'idle' | 'error'
   /** ISO 8601 timestamp of the last completed action. Present when status is 'idle'. */
   last_active?: string
+  /** Absolute path to the persistent session directory on disk. */
+  session_dir?: string
+  /** Numeric seed derived from profile_id for fingerprint selection. */
+  fingerprint_seed?: number
 }
