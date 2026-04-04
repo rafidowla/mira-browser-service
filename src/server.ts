@@ -25,6 +25,29 @@ import { contextManager } from './lib/context'
 import type { TimingConfig } from './lib/timing'
 
 // ---------------------------------------------------------------------------
+// In-memory cookie store — keyed by domain.
+// Populated by POST /session/cookie from the Chrome extension.
+// Retrieved by Block 3.5 LinkedIn task handlers via getCookie().
+// ---------------------------------------------------------------------------
+
+const cookieStore = new Map<string, string>()
+
+/**
+ * Retrieves a stored cookie value for the given domain.
+ *
+ * Purpose: Used by Block 3.5 LinkedIn action handlers to inject the
+ * li_at session cookie into authenticated browser requests.
+ *
+ * @param domain - The domain key (e.g. 'linkedin.com').
+ * @returns The stored cookie value string, or undefined if not set.
+ *
+ * Deterministic: Yes. Side Effects: None. Concurrency: Safe (read-only).
+ */
+export function getCookie(domain: string): string | undefined {
+  return cookieStore.get(domain)
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -198,6 +221,40 @@ app.get('/audit', requireToken, (_req: Request, res: Response): void => {
   const entries: AuditEntry[] = []
   const active_profiles = contextManager.listProfiles()
   res.json({ entries, active_profiles })
+})
+
+/**
+ * POST /session/cookie
+ *
+ * Purpose: Receives a session cookie from the MIRA Cookie Bridge Chrome
+ * extension. Stores the cookie value in the in-memory cookieStore keyed
+ * by domain. Block 3.5 LinkedIn action handlers retrieve it via getCookie().
+ *
+ * This design keeps credentials on the operator's machine and avoids
+ * transmitting session cookies to any remote server.
+ *
+ * Body: { cookie_name: string, cookie_value: string, domain: string }
+ * Returns: { received: true, domain: string }
+ *
+ * Side Effects: Writes to in-memory cookieStore (not persisted to disk).
+ * Error Behavior: 400 if any required field is missing.
+ * Deterministic: Yes. Concurrency: Safe (single-process event loop).
+ */
+app.post('/session/cookie', requireToken, (req: Request, res: Response): void => {
+  const { cookie_name, cookie_value, domain } = req.body as {
+    cookie_name: string
+    cookie_value: string
+    domain: string
+  }
+
+  if (!cookie_name || !cookie_value || !domain) {
+    res.status(400).json({ error: 'Missing cookie_name, cookie_value, or domain' })
+    return
+  }
+
+  cookieStore.set(domain, cookie_value)
+  console.log(`[CookieStore] Stored ${cookie_name} for domain: ${domain} (value length: ${cookie_value.length})`)
+  res.json({ received: true, domain })
 })
 
 // ---------------------------------------------------------------------------
