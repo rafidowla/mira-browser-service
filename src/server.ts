@@ -23,6 +23,11 @@ import type { TaskRequest, TaskResponse, AuditEntry, SessionStatus } from './typ
 import { DEFAULT_TIMING } from './lib/timing'
 import { contextManager } from './lib/context'
 import type { TimingConfig } from './lib/timing'
+import { getAuditLog, logAudit } from './lib/audit'
+import { readFeed } from './actions/read-feed'
+import { readComments } from './actions/read-comments'
+import { readProfile } from './actions/read-profile'
+import { readCreatorPosts } from './actions/read-creator-posts'
 
 // ---------------------------------------------------------------------------
 // In-memory cookie store — keyed by domain.
@@ -202,13 +207,67 @@ app.post('/session/status', requireToken, (req: Request, res: Response): void =>
  * Full implementation in Block 3.3.
  */
 app.post('/task', requireToken, (req: Request, res: Response): void => {
-  const _body = req.body as TaskRequest
-  void _body
-  const response: TaskResponse = {
-    success: false,
-    error: 'not_implemented',
+  const { profile_id, action, params = {} } = req.body as TaskRequest & { params?: Record<string, unknown> }
+
+  if (!profile_id || !action) {
+    res.status(400).json({ success: false, error: 'Missing profile_id or action' })
+    return
   }
-  res.json(response)
+
+  const timing = contextManager.getTimingConfig(profile_id)
+
+  /**
+   * Executes the requested action, logs to audit, and returns TaskResponse.
+   * All errors caught and returned as { success: false, error }.
+   */
+  const execute = async (): Promise<TaskResponse> => {
+    try {
+      let data: unknown
+
+      switch (action) {
+        case 'read-feed': {
+          const limit = typeof params.limit === 'number' ? params.limit : undefined
+          data = await readFeed(profile_id, timing, limit)
+          break
+        }
+        case 'read-comments': {
+          const post_url = typeof params.post_url === 'string' ? params.post_url : ''
+          const limit = typeof params.limit === 'number' ? params.limit : undefined
+          if (!post_url) return { success: false, error: 'Missing params.post_url' }
+          data = await readComments(profile_id, post_url, timing, limit)
+          break
+        }
+        case 'read-profile': {
+          const target_url = typeof params.target_url === 'string' ? params.target_url : ''
+          if (!target_url) return { success: false, error: 'Missing params.target_url' }
+          data = await readProfile(profile_id, target_url, timing)
+          break
+        }
+        case 'read-creator-posts': {
+          const creator_url = typeof params.creator_url === 'string' ? params.creator_url : ''
+          const limit = typeof params.limit === 'number' ? params.limit : undefined
+          if (!creator_url) return { success: false, error: 'Missing params.creator_url' }
+          data = await readCreatorPosts(profile_id, creator_url, timing, limit)
+          break
+        }
+        default:
+          return { success: false, error: `Unknown action: ${action}` }
+      }
+
+      logAudit({ profile_id, action, result: 'success' })
+      return { success: true, data }
+
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      logAudit({ profile_id, action, result: 'failure', detail: message })
+      return { success: false, error: message }
+    }
+  }
+
+  execute().then((response) => res.json(response)).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : 'Task error'
+    res.status(500).json({ success: false, error: message })
+  })
 })
 
 /**
@@ -218,7 +277,7 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
  * Full implementation in Block 3.4.
  */
 app.get('/audit', requireToken, (_req: Request, res: Response): void => {
-  const entries: AuditEntry[] = []
+  const entries = getAuditLog()
   const active_profiles = contextManager.listProfiles()
   res.json({ entries, active_profiles })
 })

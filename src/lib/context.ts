@@ -270,6 +270,34 @@ export class ContextManager {
   }
 
   /**
+   * Returns the raw BrowserContext for a profile, or null if uninitialised.
+   *
+   * Purpose: Used by action handlers to create new pages for browser automation.
+   *
+   * @param profile_id - Profile to retrieve the context for.
+   * @returns BrowserContext instance or null.
+   *
+   * Deterministic: Yes. Side Effects: None.
+   */
+  getContext(profile_id: string): BrowserContext | null {
+    return this.contexts.get(profile_id)?.context ?? null
+  }
+
+  /**
+   * Returns the resolved TimingConfig for a profile, or DEFAULT_TIMING if unknown.
+   *
+   * Purpose: Used by action handlers to apply the correct per-profile timing.
+   *
+   * @param profile_id - Profile to retrieve timing for.
+   * @returns TimingConfig for the profile, or DEFAULT_TIMING as fallback.
+   *
+   * Deterministic: Yes. Side Effects: None.
+   */
+  getTimingConfig(profile_id: string): TimingConfig {
+    return this.contexts.get(profile_id)?.timing_config ?? DEFAULT_TIMING
+  }
+
+  /**
    * Returns the current SessionStatus for all known profiles.
    *
    * Purpose: Used by GET /audit to expose the full set of active profiles
