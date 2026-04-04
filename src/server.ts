@@ -20,6 +20,7 @@
 import 'dotenv/config'
 import express, { Request, Response, NextFunction } from 'express'
 import type { TaskRequest, TaskResponse, AuditEntry, SessionStatus } from './types'
+import { DEFAULT_TIMING } from './lib/timing'
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -97,6 +98,21 @@ function requireToken(req: Request, res: Response, next: NextFunction): void {
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
+
+/**
+ * GET /timing/defaults
+ *
+ * Purpose: Returns the DEFAULT_TIMING configuration as JSON.
+ * No auth required — transparency is part of the trust model.
+ * Operators can inspect exactly what timing cadences MIRA applies
+ * to their browser sessions without needing to read source code.
+ *
+ * Returns: DEFAULT_TIMING object (TimingConfig).
+ * Side Effects: None.
+ */
+app.get('/timing/defaults', (_req: Request, res: Response): void => {
+  res.json(DEFAULT_TIMING)
+})
 
 /**
  * GET /health
