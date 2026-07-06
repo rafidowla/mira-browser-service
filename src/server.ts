@@ -29,6 +29,7 @@ import { readComments } from './actions/read-comments'
 import { readProfile } from './actions/read-profile'
 import { readCreatorPosts } from './actions/read-creator-posts'
 import { openUrl } from './actions/open-url'
+import { readInbox } from './actions/read-inbox'
 
 // ---------------------------------------------------------------------------
 // In-memory cookie store — keyed by domain.
@@ -257,6 +258,14 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
           const url = typeof params.url === 'string' ? params.url : ''
           if (!url) return { success: false, error: 'Missing params.url' }
           data = await openUrl(profile_id, url, timing)
+          break
+        }
+        case 'read-inbox': {
+          // Reads the operator's OWN LinkedIn messaging inbox. Safest possible
+          // read (own data), but still on-demand/button-triggered only — see
+          // build plan §3 tripwire and §6 "Inbound — inbox triage".
+          const limit = typeof params.limit === 'number' ? params.limit : undefined
+          data = await readInbox(profile_id, timing, limit)
           break
         }
         default:
