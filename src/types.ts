@@ -32,6 +32,11 @@ export interface TaskRequest {
  *   - success: Whether the task completed without error.
  *   - data: Action-specific result payload (present on success).
  *   - error: Human-readable error message (present on failure).
+ *   - auth_wall: Explicit logged-out/challenge detection (Canon H1.4/H1.8) —
+ *     when true, the app must STOP the scan and tell the human, never retry.
+ *   - auth_wall_reason: Which auth-wall shape was detected, when auth_wall is true.
+ *   - confidence: Extraction-confidence report for read actions (Canon H1.4),
+ *     letting the app distinguish "quiet feed" from "broken selector".
  */
 export interface TaskResponse {
   /** True if the task completed successfully. */
@@ -40,6 +45,19 @@ export interface TaskResponse {
   data?: unknown
   /** Human-readable error description. Present only when success is false. */
   error?: string
+  /** True when the browser service detected a login/checkpoint/empty-shell auth wall. */
+  auth_wall?: boolean
+  /** Which auth-wall shape was detected — see lib/auth-wall.ts. */
+  auth_wall_reason?: 'login_page' | 'checkpoint' | 'empty_authed_shell' | null
+  /** Extraction-confidence report for read actions — see lib/confidence.ts. */
+  confidence?: {
+    items_found: number
+    level: 'high' | 'medium' | 'low' | 'none'
+    field_fill_rate: number
+    fields_missing_on_all_items: string[]
+    max_fallback_rank_used: number
+    zero_items: boolean
+  }
 }
 
 /**

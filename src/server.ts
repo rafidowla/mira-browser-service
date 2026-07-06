@@ -30,6 +30,9 @@ import { readProfile } from './actions/read-profile'
 import { readCreatorPosts } from './actions/read-creator-posts'
 import { openUrl } from './actions/open-url'
 import { readInbox } from './actions/read-inbox'
+import type { ExtractionConfidence } from './lib/confidence'
+import type { AuthWallReason } from './lib/auth-wall'
+import { AUTH_WALL_REASON_DETAIL } from './lib/auth-wall'
 
 // ---------------------------------------------------------------------------
 // In-memory cookie store — keyed by domain.
@@ -203,6 +206,53 @@ app.post('/session/status', requireToken, (req: Request, res: Response): void =>
 })
 
 /**
+ * Builds the common TaskResponse shape for a read action, given its extracted
+ * items, ExtractionConfidence report, and auth-wall state (Canon H1.4).
+ *
+ * Purpose: All five read actions (read-feed, read-comments, read-profile,
+ * read-creator-posts, read-inbox) now return { items, confidence, auth_wall,
+ * auth_wall_reason } from their action module; this shared helper turns that
+ * into the TaskResponse the app expects, logging the audit entry and — on an
+ * explicit auth-wall — returning success: false with the wall surfaced as a
+ * first-class field so /api/browser-task can act on it (Canon H1.8) without
+ * having to guess from an error-message substring.
+ *
+ * @param profile_id - MIRA profile the action ran for (audit logging).
+ * @param action - Action name (audit logging).
+ * @param data - The action's extracted items/object payload.
+ * @param confidence - ExtractionConfidence report for this invocation.
+ * @param auth_wall - True if an auth-wall was detected during this invocation.
+ * @param auth_wall_reason - Which auth-wall shape, when auth_wall is true.
+ * @returns TaskResponse ready to send to the client.
+ *
+ * Side Effects: Writes one AuditEntry via logAudit(). Deterministic: Yes
+ * (given deterministic inputs). Network: None.
+ */
+function finishReadAction(
+  profile_id: string,
+  action: string,
+  data: unknown,
+  confidence: ExtractionConfidence,
+  auth_wall: boolean,
+  auth_wall_reason: AuthWallReason,
+): TaskResponse {
+  if (auth_wall) {
+    const detail = auth_wall_reason ? AUTH_WALL_REASON_DETAIL[auth_wall_reason] : 'Auth wall detected.'
+    logAudit({ profile_id, action, result: 'failure', detail: `auth_wall:${auth_wall_reason} - ${detail}` })
+    return {
+      success: false,
+      error: detail,
+      auth_wall: true,
+      auth_wall_reason,
+      confidence,
+    }
+  }
+
+  logAudit({ profile_id, action, result: 'success' })
+  return { success: true, data, confidence, auth_wall: false, auth_wall_reason: null }
+}
+
+/**
  * POST /task
  *
  * Purpose: (Stub) Execute a browser automation task for a given profile.
@@ -224,56 +274,52 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
    */
   const execute = async (): Promise<TaskResponse> => {
     try {
-      let data: unknown
-
       switch (action) {
         case 'read-feed': {
           const limit = typeof params.limit === 'number' ? params.limit : undefined
-          data = await readFeed(profile_id, timing, limit)
-          break
+          const result = await readFeed(profile_id, timing, limit)
+          return finishReadAction(profile_id, action, result.posts, result.confidence, result.auth_wall, result.auth_wall_reason)
         }
         case 'read-comments': {
           const post_url = typeof params.post_url === 'string' ? params.post_url : ''
           const limit = typeof params.limit === 'number' ? params.limit : undefined
           if (!post_url) return { success: false, error: 'Missing params.post_url' }
-          data = await readComments(profile_id, post_url, timing, limit)
-          break
+          const result = await readComments(profile_id, post_url, timing, limit)
+          return finishReadAction(profile_id, action, result.comments, result.confidence, result.auth_wall, result.auth_wall_reason)
         }
         case 'read-profile': {
           const target_url = typeof params.target_url === 'string' ? params.target_url : ''
           if (!target_url) return { success: false, error: 'Missing params.target_url' }
-          data = await readProfile(profile_id, target_url, timing)
-          break
+          const result = await readProfile(profile_id, target_url, timing)
+          return finishReadAction(profile_id, action, result.profile, result.confidence, result.auth_wall, result.auth_wall_reason)
         }
         case 'read-creator-posts': {
           const creator_url = typeof params.creator_url === 'string' ? params.creator_url : ''
           const limit = typeof params.limit === 'number' ? params.limit : undefined
           if (!creator_url) return { success: false, error: 'Missing params.creator_url' }
-          data = await readCreatorPosts(profile_id, creator_url, timing, limit)
-          break
+          const result = await readCreatorPosts(profile_id, creator_url, timing, limit)
+          return finishReadAction(profile_id, action, result.posts, result.confidence, result.auth_wall, result.auth_wall_reason)
         }
         case 'open-url': {
           // Drafts-first execution: open the target in the operator's authenticated
           // headful window and leave it open. Navigate/read-class — no writes.
           const url = typeof params.url === 'string' ? params.url : ''
           if (!url) return { success: false, error: 'Missing params.url' }
-          data = await openUrl(profile_id, url, timing)
-          break
+          const data = await openUrl(profile_id, url, timing)
+          logAudit({ profile_id, action, result: 'success' })
+          return { success: true, data }
         }
         case 'read-inbox': {
           // Reads the operator's OWN LinkedIn messaging inbox. Safest possible
           // read (own data), but still on-demand/button-triggered only — see
           // build plan §3 tripwire and §6 "Inbound — inbox triage".
           const limit = typeof params.limit === 'number' ? params.limit : undefined
-          data = await readInbox(profile_id, timing, limit)
-          break
+          const result = await readInbox(profile_id, timing, limit)
+          return finishReadAction(profile_id, action, result.conversations, result.confidence, result.auth_wall, result.auth_wall_reason)
         }
         default:
           return { success: false, error: `Unknown action: ${action}` }
       }
-
-      logAudit({ profile_id, action, result: 'success' })
-      return { success: true, data }
 
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
