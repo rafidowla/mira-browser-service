@@ -28,6 +28,7 @@ import { readFeed } from './actions/read-feed'
 import { readComments } from './actions/read-comments'
 import { readProfile } from './actions/read-profile'
 import { readCreatorPosts } from './actions/read-creator-posts'
+import { openUrl } from './actions/open-url'
 
 // ---------------------------------------------------------------------------
 // In-memory cookie store — keyed by domain.
@@ -248,6 +249,14 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
           const limit = typeof params.limit === 'number' ? params.limit : undefined
           if (!creator_url) return { success: false, error: 'Missing params.creator_url' }
           data = await readCreatorPosts(profile_id, creator_url, timing, limit)
+          break
+        }
+        case 'open-url': {
+          // Drafts-first execution: open the target in the operator's authenticated
+          // headful window and leave it open. Navigate/read-class — no writes.
+          const url = typeof params.url === 'string' ? params.url : ''
+          if (!url) return { success: false, error: 'Missing params.url' }
+          data = await openUrl(profile_id, url, timing)
           break
         }
         default:

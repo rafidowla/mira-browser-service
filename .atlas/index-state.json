@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "root": "/Users/rdowla/Downloads/AiDev/BitBucket/non-core/mira-browser-service",
+  "workspace": "mira-browser",
+  "files": {
+    "src/server.ts": {
+      "mtimeMs": 1775272807295.3347,
+      "sizeBytes": 11900,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/types.ts": {
+      "mtimeMs": 1775270959445.3022,
+      "sizeBytes": 2981,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/lib/audit.ts": {
+      "mtimeMs": 1775272655940.0515,
+      "sizeBytes": 2692,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/lib/context.ts": {
+      "mtimeMs": 1775272630023.521,
+      "sizeBytes": 12118,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/lib/fingerprint.ts": {
+      "mtimeMs": 1775270873918.923,
+      "sizeBytes": 4163,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/lib/timing.ts": {
+      "mtimeMs": 1775270209411.9905,
+      "sizeBytes": 5254,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/actions/read-comments.ts": {
+      "mtimeMs": 1775272777848.002,
+      "sizeBytes": 3993,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/actions/read-creator-posts.ts": {
+      "mtimeMs": 1775272777848.4568,
+      "sizeBytes": 4508,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/actions/read-feed.ts": {
+      "mtimeMs": 1775272708360.7456,
+      "sizeBytes": 7879,
+      "indexedAt": "2026-06-30T19:43:36.333Z"
+    },
+    "src/actions/read-profile.ts": {
+      "mtimeMs": 1775272777848.2537,
+      "sizeBytes": 4233,
+      "indexedAt": "2026-06-30T19:43:36.334Z"
+    }
+  },
+  "updatedAt": "2026-06-30T19:43:36.345Z"
+}
