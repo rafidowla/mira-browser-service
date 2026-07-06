@@ -3,7 +3,7 @@
  *
  * Purpose: Records every browser action attempted by the service, whether
  * successful or failed. Provides the GET /audit endpoint with real data.
- * Will be persisted to SurrealDB in Block 3.6.
+ * Can be persisted to Dataplane or local Lore for durable audit trails.
  *
  * Design: Simple append-only in-memory array. getAuditLog() returns a copy
  * to prevent external mutation of the log.
