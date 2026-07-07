@@ -6,7 +6,12 @@
  * browser fingerprint, and timing configuration. A mutex ensures only one
  * profile executes actions at a time, preventing browser resource contention.
  *
- * Uses playwright-extra with the stealth plugin to reduce bot-detection signals.
+ * Uses CloakBrowser (source-level fingerprint-patched Chromium) as the browser
+ * engine. CloakBrowser is a drop-in Playwright replacement whose C++ patches
+ * neutralise canvas/WebGL/audio fingerprinting, GPU/hardware reporting, WebRTC
+ * leaks, and automation signals — a materially stronger anti-detection posture
+ * than the JS-level playwright-extra + stealth plugin it replaces. Pinned to the
+ * free v146 binary (see README); Pro/v148+ is not configured.
  *
  * Side Effects:
  *   - Creates ./sessions/{profile_id}/ directories on disk.
@@ -16,7 +21,6 @@
  * Deterministic: No (browser I/O). Concurrency: Mutex-protected per profile.
  */
 
-import { chromium } from 'playwright-extra'
 import type { BrowserContext } from 'playwright'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -24,10 +28,14 @@ import { DEFAULT_TIMING, mergeTimingConfig, TimingConfig } from './timing'
 import { generateFingerprint } from './fingerprint'
 import type { SessionStatus } from '../types'
 
-// stealth plugin: CJS default export — use require for safe interop
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
-const StealthPlugin = require("puppeteer-extra-plugin-stealth") as any
-chromium.use(StealthPlugin())
+// cloakbrowser is an ESM-only package (its exports map has no `require`
+// condition). This service compiles to CommonJS, where a static `import` is
+// emitted as require() and throws ERR_PACKAGE_PATH_NOT_EXPORTED against
+// cloakbrowser. We load it via a genuine dynamic import() — wrapped in Function
+// so TypeScript's commonjs transform doesn't rewrite it back into require().
+const importCloakBrowser = new Function(
+  'return import("cloakbrowser")'
+) as () => Promise<typeof import('cloakbrowser')>
 
 /**
  * Complete runtime state for a managed browser profile.
@@ -145,23 +153,50 @@ export class ContextManager {
     this.contexts.set(profile_id, profileCtx)
 
     try {
-      console.log(`[ContextManager] Launching browser for profile ${profile_id}`)
+      console.log(`[ContextManager] Launching CloakBrowser for profile ${profile_id}`)
       console.log(`[ContextManager] Session dir: ${session_dir}`)
-      console.log(`[ContextManager] Fingerprint: ${fingerprint.viewport.width}x${fingerprint.viewport.height} ${fingerprint.timezone_id}`)
+      console.log(`[ContextManager] Fingerprint seed: ${profileCtx.fingerprint_seed} (${fingerprint.viewport.width}x${fingerprint.viewport.height} ${fingerprint.timezone_id})`)
 
-      const context = await chromium.launchPersistentContext(session_dir, {
+      // CloakBrowser owns the hard fingerprint surfaces (userAgent, canvas/WebGL/
+      // audio, GPU, WebRTC, automation signals) via its C++ patches, keyed off a
+      // deterministic per-profile seed so the identity is stable across restarts.
+      // We still set honest context-level options (viewport, locale, timezone,
+      // colorScheme) — those don't contradict the patched navigator. We do NOT
+      // pass a hand-rolled userAgent: a UA that disagrees with CloakBrowser's
+      // patched navigator would itself be a detection signal. (generateFingerprint
+      // still supplies the viewport/locale/tz tables; its user_agent field is now
+      // unused here by design.)
+      // NOTE: the exact CloakBrowser launch-option surface (option names, the
+      // --fingerprint arg) is validated blind here — confirm on the first live
+      // run against the test account (H1.4/H1.5) before the real account.
+      const { launchPersistentContext } = await importCloakBrowser()
+      const context = await launchPersistentContext({
+        // CloakBrowser takes a single options object (userDataDir inside it),
+        // unlike Playwright's (userDataDir, options) — see cloakbrowser types.
+        userDataDir: session_dir,
         headless: false,
         viewport: fingerprint.viewport,
-        userAgent: fingerprint.user_agent,
+        // locale/timezone go through CloakBrowser's top-level wrapper fields,
+        // which route to undetectable binary flags. Passing them via Playwright
+        // context options would use detectable CDP emulation (cloakbrowser
+        // strips them there for exactly this reason).
         locale: fingerprint.locale,
         timezoneId: fingerprint.timezone_id,
         colorScheme: fingerprint.color_scheme,
+        // stealthArgs:false → use our deterministic per-profile --fingerprint
+        // seed instead of CloakBrowser's randomized default fingerprint args, so
+        // a profile's identity is stable across restarts. The C++ source-level
+        // patches stay active regardless of this flag.
+        stealthArgs: false,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-blink-features=AutomationControlled",
+          `--fingerprint=${profileCtx.fingerprint_seed}`,
         ],
+        // Binary version intentionally unset → resolves to the free v146 tier.
+        // Do NOT set licenseKey/browserVersion (or the CLOAKBROWSER_LICENSE_KEY
+        // / CLOAKBROWSER_VERSION env vars) without the founder's Pro decision.
       })
 
       profileCtx.context = context as unknown as BrowserContext
