@@ -24,7 +24,7 @@
 import type { BrowserContext } from 'playwright'
 import * as fs from 'fs'
 import * as path from 'path'
-import { DEFAULT_TIMING, mergeTimingConfig, TimingConfig } from './timing'
+import { DEFAULT_TIMING, mergeTimingConfig, TimingConfig, jitter } from './timing'
 import { generateFingerprint } from './fingerprint'
 import type { SessionStatus } from '../types'
 
@@ -56,10 +56,58 @@ export interface ProfileContext {
   last_active: Date | null
   /** Numeric seed derived from profile_id for fingerprint selection. */
   fingerprint_seed: number
+  /** Actions completed in this session so far — see recordAction(). */
+  actions_this_session: number
+  /**
+   * Randomised ceiling (from timing_config.max_actions_per_session) chosen
+   * once when this session was launched. Once actions_this_session reaches
+   * this, recordAction() signals the caller to close the session — a bounded
+   * burst of activity per session, not an open-ended one.
+   */
+  session_action_budget: number
 }
 
 /** Base session directory — all profile dirs are children of this. */
 const SESSIONS_ROOT = path.join(process.cwd(), "sessions")
+
+/**
+ * On-disk pacing state for a profile, written on session close and read on
+ * the next session/init — deliberately on disk, not just in-memory, so the
+ * inter-session gap survives a service restart (Canon: a same-day burst of
+ * automated sessions is exactly the pattern that got a real account tagged
+ * `uc=scraping` by LinkedIn's bot detection during 2026-07-08 live testing;
+ * an in-memory-only timestamp would have been silently reset by every
+ * ts-node-dev restart during that same testing, providing zero protection).
+ */
+interface PacingState {
+  /** ISO timestamp of when the previous session's browser context closed. */
+  lastSessionEndedAt: string
+}
+
+function pacingStatePath(session_dir: string): string {
+  return path.join(session_dir, '.mira-pacing.json')
+}
+
+/** Never throws — a missing/corrupt file just means "no prior session". */
+function readPacingState(session_dir: string): PacingState | null {
+  try {
+    const raw = fs.readFileSync(pacingStatePath(session_dir), 'utf8')
+    return JSON.parse(raw) as PacingState
+  } catch {
+    return null
+  }
+}
+
+/** Never throws — a failed write only loses the pacing guarantee for the
+ * next session, it must not crash the (already-succeeded) close operation. */
+function writePacingState(session_dir: string, state: PacingState): void {
+  try {
+    fs.writeFileSync(pacingStatePath(session_dir), JSON.stringify(state, null, 2))
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`[ContextManager] Failed to write pacing state: ${message}`)
+  }
+}
 
 /**
  * ContextManager - Manages the lifecycle of per-profile browser contexts.
@@ -138,6 +186,27 @@ export class ContextManager {
       ? mergeTimingConfig(DEFAULT_TIMING, timing_overrides)
       : DEFAULT_TIMING
 
+    // Inter-session pacing gate — checked BEFORE launching, using on-disk
+    // state from the PREVIOUS session's close (see PacingState above for why
+    // disk, not memory). A same-day burst of back-to-back sessions is exactly
+    // the usage pattern that got a real account tagged `uc=scraping` by
+    // LinkedIn's bot detection (2026-07-08 live investigation, PENDING.md §2).
+    const pacing = readPacingState(session_dir)
+    if (pacing?.lastSessionEndedAt) {
+      const lastEndedMs = new Date(pacing.lastSessionEndedAt).getTime()
+      const gapMinutes = jitter(timing_config.inter_session_gap)
+      const availableAtMs = lastEndedMs + gapMinutes * 60_000
+      if (!Number.isNaN(lastEndedMs) && Date.now() < availableAtMs) {
+        const waitMinutes = Math.ceil((availableAtMs - Date.now()) / 60_000)
+        throw new Error(
+          `Session pacing: the previous session for profile ${profile_id} ended too ` +
+          `recently. Next session available in ~${waitMinutes} more minute(s) ` +
+          `(around ${new Date(availableAtMs).toLocaleTimeString()}). This gap exists ` +
+          `so MIRA never looks like a bot running back-to-back automated sessions.`
+        )
+      }
+    }
+
     const fingerprint = generateFingerprint(profile_id)
 
     // Create a placeholder entry immediately so status is visible
@@ -149,6 +218,9 @@ export class ContextManager {
       timing_config,
       last_active: null,
       fingerprint_seed: hashProfileId(profile_id),
+      actions_this_session: 0,
+      // Randomised once per session (not a fixed number) — see recordAction().
+      session_action_budget: jitter(timing_config.max_actions_per_session),
     }
     this.contexts.set(profile_id, profileCtx)
 
@@ -188,6 +260,16 @@ export class ContextManager {
         // a profile's identity is stable across restarts. The C++ source-level
         // patches stay active regardless of this flag.
         stealthArgs: false,
+        // humanize: CloakBrowser's own mouse/keyboard/scroll humanization —
+        // vendor-tested, more sophisticated than a hand-rolled jitter (see
+        // timing.ts's mouse_jitter field, intentionally superseded, not
+        // separately implemented). 'careful' over 'default': this drives a
+        // real operator's account, not a throwaway — bias toward the more
+        // conservative preset. Added 2026-07-08 after live testing showed
+        // LinkedIn's PerimeterX bot-detection tagging this session's traffic
+        // pattern `uc=scraping` — see PENDING.md §2.
+        humanize: true,
+        humanPreset: 'careful',
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
@@ -251,6 +333,35 @@ export class ContextManager {
   }
 
   /**
+   * Records that one action was completed in this profile's current session,
+   * and reports whether the session's randomised action budget has now been
+   * reached (in which case the caller — server.ts's /task handler — should
+   * close the profile, forcing a fresh inter_session_gap wait before the next
+   * one). Bounds a session to a human-like burst of activity (8-15 actions by
+   * default) rather than an unbounded run.
+   *
+   * @param profile_id - The profile that just completed an action.
+   * @returns shouldClose (budget reached or profile unknown), plus the
+   *   current count/budget for logging. Safe to call for an unknown
+   *   profile_id — returns shouldClose:false rather than throwing.
+   *
+   * Deterministic: Yes (given prior state). Side Effects: Mutates the
+   * profile's actions_this_session counter.
+   */
+  recordAction(profile_id: string): { shouldClose: boolean; actionsThisSession: number; budget: number } {
+    const profileCtx = this.contexts.get(profile_id)
+    if (!profileCtx) {
+      return { shouldClose: false, actionsThisSession: 0, budget: 0 }
+    }
+    profileCtx.actions_this_session += 1
+    return {
+      shouldClose: profileCtx.actions_this_session >= profileCtx.session_action_budget,
+      actionsThisSession: profileCtx.actions_this_session,
+      budget: profileCtx.session_action_budget,
+    }
+  }
+
+  /**
    * Returns the current SessionStatus for a given profile.
    *
    * Purpose: HTTP-safe status snapshot — does not expose raw BrowserContext.
@@ -296,6 +407,11 @@ export class ContextManager {
         console.error(`[ContextManager] Error closing context for ${profile_id}: ${message}`)
       }
     }
+
+    // Record when this session ended so the NEXT initProfile() call can
+    // enforce the inter-session gap — on disk, so it survives a service
+    // restart (see PacingState).
+    writePacingState(profileCtx.session_dir, { lastSessionEndedAt: new Date().toISOString() })
 
     this.contexts.delete(profile_id)
     if (this.activeMutex === profile_id) {

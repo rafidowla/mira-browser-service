@@ -197,9 +197,7 @@ export async function readFeed(
     page = await context.newPage() as unknown as Page
     // Bring to front — a backgrounded tab gets Chrome's reduced-priority
     // throttling (delayed timers/rendering), which can make LinkedIn's SPA
-    // content take far longer to hydrate than a foregrounded tab (observed
-    // live: page.$() found nothing for the full poll window while a
-    // snapshot moments later showed the content present).
+    // content take far longer to hydrate than a foregrounded tab.
     await page.bringToFront().catch(() => undefined)
     console.log(`[readFeed] Navigating to feed for profile ${profile_id}`)
 
@@ -213,6 +211,14 @@ export async function readFeed(
     // before saying "not an auth wall" produced false empty_authed_shell
     // reports on a genuinely-connected account. Extraction below still uses
     // FEED_POST_SELECTORS.container only, so confidence reporting stays honest.
+    // NOTE (2026-07-08 live investigation): #primary-nav specifically did NOT
+    // reliably match even on a confirmed-rendered, logged-in feed with real
+    // content — it's kept here as a harmless best-effort OR-clause, but treat
+    // it as unverified. Root cause of that day's false empty_authed_shell
+    // turned out to be LinkedIn's own bot-detection (PerimeterX tagged the
+    // session `uc=scraping`), not this selector — see PENDING.md §2. Replacing
+    // #primary-nav with a verified marker is H1.4 test-account work, not
+    // something to guess at again blind.
     const authWallCheckSelector = [...FEED_POST_SELECTORS.container, ...LOGIN_CONFIRMED_MARKERS].join(', ')
     await waitForPageSettled(page, authWallCheckSelector)
     await humanDelay(timing.page_read_delay)

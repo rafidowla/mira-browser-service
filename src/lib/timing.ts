@@ -46,7 +46,16 @@ export interface TimingConfig {
   max_actions_per_session: TimingRange
   /** Pixels to scroll before reading page content. */
   scroll_amount: TimingRange
-  /** Subtle mouse position randomisation to humanise cursor movement. */
+  /**
+   * Subtle mouse position randomisation to humanise cursor movement.
+   * SUPERSEDED (2026-07-08): CloakBrowser's own `humanize`/`humanPreset`
+   * launch option (see context.ts) provides vendor-tested mouse/keyboard/
+   * scroll humanization at the browser-engine level — materially more
+   * sophisticated than a hand-rolled radius-jitter would be. Kept as a typed
+   * field (some external readers of GET /timing/defaults may still reference
+   * it) but intentionally not separately implemented — do not build a DIY
+   * mouse-jitter on top of it.
+   */
   mouse_jitter: { enabled: boolean; radius: number }
 }
 

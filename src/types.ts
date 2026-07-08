@@ -58,6 +58,13 @@ export interface TaskResponse {
     max_fallback_rank_used: number
     zero_items: boolean
   }
+  /**
+   * True when this task pushed the session's randomised action budget
+   * (timing_config.max_actions_per_session) and the browser context was
+   * auto-closed for pacing. The next task for this profile must call
+   * /session/init again, which enforces the inter_session_gap wait.
+   */
+  session_closed_for_pacing?: boolean
 }
 
 /**

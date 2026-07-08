@@ -67,7 +67,19 @@ export async function detectAuthWall(
 
 async function anySelectorPresent(page: Page, selectors: readonly string[]): Promise<boolean> {
   for (const selector of selectors) {
-    const found = await page.$(selector).then((el) => el !== null).catch(() => false)
+    let found: boolean
+    try {
+      const el = await page.$(selector)
+      found = el !== null
+    } catch (error: unknown) {
+      // Previously silently caught as "not found" — now logged, since a
+      // thrown query (vs. a clean zero-match) would fully explain a false
+      // empty_authed_shell on a confirmed-logged-in page (Canon H1.4
+      // live-DOM investigation, 2026-07-08).
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[anySelectorPresent] page.$() THREW for "${selector}": ${message}`)
+      found = false
+    }
     if (found) return true
   }
   return false

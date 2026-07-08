@@ -20,7 +20,7 @@
 import 'dotenv/config'
 import express, { Request, Response, NextFunction } from 'express'
 import type { TaskRequest, TaskResponse, AuditEntry, SessionStatus } from './types'
-import { DEFAULT_TIMING } from './lib/timing'
+import { DEFAULT_TIMING, mergeTimingConfig, isWithinActiveHours } from './lib/timing'
 import { contextManager } from './lib/context'
 import type { TimingConfig } from './lib/timing'
 import { getAuditLog, logAudit } from './lib/audit'
@@ -163,6 +163,14 @@ app.get('/health', (_req: Request, res: Response): void => {
   })
 })
 
+/** Human-facing message for the active-hours gate, shared by both routes below. */
+function activeHoursMessage(timing: TimingConfig): string {
+  return (
+    `Outside active hours (${timing.active_hours.start}:00–${timing.active_hours.end}:00 local). ` +
+    `MIRA only runs LinkedIn automation during normal daytime hours to avoid an inhuman usage pattern.`
+  )
+}
+
 /**
  * POST /session/init
  *
@@ -178,6 +186,16 @@ app.post('/session/init', requireToken, (req: Request, res: Response): void => {
     res.status(400).json({ error: 'Missing profile_id' })
     return
   }
+
+  // Active-hours gate, checked BEFORE launching — a session starting outside
+  // normal daytime hours is itself an automation tell, independent of what
+  // happens once the browser is open.
+  const effectiveTiming = timing_overrides ? mergeTimingConfig(DEFAULT_TIMING, timing_overrides) : DEFAULT_TIMING
+  if (!isWithinActiveHours(effectiveTiming)) {
+    res.status(403).json({ error: activeHoursMessage(effectiveTiming) })
+    return
+  }
+
   contextManager
     .initProfile(profile_id, timing_overrides)
     .then((ctx) => {
@@ -268,6 +286,13 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
 
   const timing = contextManager.getTimingConfig(profile_id)
 
+  // Active-hours gate — a task running outside normal daytime hours is an
+  // automation tell on its own, regardless of which action it is.
+  if (!isWithinActiveHours(timing)) {
+    res.status(403).json({ success: false, error: activeHoursMessage(timing) })
+    return
+  }
+
   /**
    * Executes the requested action, logs to audit, and returns TaskResponse.
    * All errors caught and returned as { success: false, error }.
@@ -328,7 +353,26 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
     }
   }
 
-  execute().then((response) => res.json(response)).catch((error: unknown) => {
+  execute().then((response) => {
+    // Bound the session to a human-like burst of activity (Canon: an
+    // unbounded run of automated actions is itself a detection signal).
+    // Every task counts, success or auth-wall/failure — each one drove a
+    // real browser navigation. Once the session's randomised budget is hit,
+    // close it; the next initProfile() then enforces the inter-session gap.
+    const pacing = contextManager.recordAction(profile_id)
+    if (pacing.shouldClose) {
+      console.log(
+        `[server] Profile ${profile_id} reached its session action budget ` +
+        `(${pacing.actionsThisSession}/${pacing.budget}) — closing for pacing.`
+      )
+      contextManager.closeProfile(profile_id).catch((error: unknown) => {
+        console.error(`[server] Failed to auto-close ${profile_id} for pacing: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      res.json({ ...response, session_closed_for_pacing: true })
+      return
+    }
+    res.json(response)
+  }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : 'Task error'
     res.status(500).json({ success: false, error: message })
   })
