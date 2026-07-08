@@ -4,3 +4,7 @@ dist/
 sessions/
 snapshots/
 *.log
+
+# launcher's dependency-staleness marker (packaging/start.mjs) — regenerated
+# per-machine, must never ship in a build or get committed
+.mira-deps-fingerprint
