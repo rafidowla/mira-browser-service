@@ -16,9 +16,9 @@
 import type { Page } from 'playwright'
 import { contextManager } from '../lib/context'
 import { humanDelay, TimingConfig } from '../lib/timing'
-import { extractField, COMMENT_SELECTORS } from '../lib/selector-registry'
+import { extractField, COMMENT_SELECTORS, LOGIN_CONFIRMED_MARKERS } from '../lib/selector-registry'
 import { computeConfidence, shouldSnapshotOnLowConfidence, type ExtractionConfidence, type FieldOutcome } from '../lib/confidence'
-import { detectAuthWall, captureFailureSnapshot } from '../lib/read-action-support'
+import { detectAuthWall, captureFailureSnapshot, waitForPageSettled } from '../lib/read-action-support'
 import type { AuthWallReason } from '../lib/auth-wall'
 
 /** Structured comment extracted from a LinkedIn post. */
@@ -170,10 +170,14 @@ export async function readComments(
   try {
     page = await context.newPage() as unknown as Page
     await page.goto(post_url, { waitUntil: "domcontentloaded", timeout: 30000 })
+
+    // Widened with LOGIN_CONFIRMED_MARKERS — see read-feed.ts for why (a real
+    // logged-in session can render before this page's own content does).
+    const authWallCheckSelector = [...COMMENT_SELECTORS.container, ...LOGIN_CONFIRMED_MARKERS].join(', ')
+    await waitForPageSettled(page, authWallCheckSelector)
     await humanDelay(timing.page_read_delay)
 
-    const primaryContentSelector = COMMENT_SELECTORS.container[0]
-    const authWall = await detectAuthWall(page, primaryContentSelector)
+    const authWall = await detectAuthWall(page, authWallCheckSelector)
     if (authWall.auth_wall) {
       console.warn(`[readComments] Auth wall detected for profile ${profile_id}: ${authWall.reason}`)
       await captureFailureSnapshot(page, 'read-comments', profile_id, 'auth_wall', authWall.reason ?? undefined)

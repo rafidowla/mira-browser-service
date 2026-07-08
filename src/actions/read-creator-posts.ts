@@ -16,9 +16,9 @@
 import type { Page } from 'playwright'
 import { contextManager } from '../lib/context'
 import { humanDelay, jitter, TimingConfig } from '../lib/timing'
-import { extractField, CREATOR_POST_SELECTORS } from '../lib/selector-registry'
+import { extractField, CREATOR_POST_SELECTORS, LOGIN_CONFIRMED_MARKERS } from '../lib/selector-registry'
 import { computeConfidence, shouldSnapshotOnLowConfidence, type ExtractionConfidence, type FieldOutcome } from '../lib/confidence'
-import { detectAuthWall, captureFailureSnapshot } from '../lib/read-action-support'
+import { detectAuthWall, captureFailureSnapshot, waitForPageSettled } from '../lib/read-action-support'
 import type { AuthWallReason } from '../lib/auth-wall'
 
 /** Structured representation of a creator's LinkedIn post. */
@@ -175,10 +175,13 @@ export async function readCreatorPosts(
     page = await context.newPage() as unknown as Page
     console.log(`[readCreatorPosts] Navigating to ${activityUrl}`)
     await page.goto(activityUrl, { waitUntil: "domcontentloaded", timeout: 30000 })
+
+    // Widened with LOGIN_CONFIRMED_MARKERS — see read-feed.ts for why.
+    const authWallCheckSelector = [...CREATOR_POST_SELECTORS.container, ...LOGIN_CONFIRMED_MARKERS].join(', ')
+    await waitForPageSettled(page, authWallCheckSelector)
     await humanDelay(timing.page_read_delay)
 
-    const primaryContentSelector = CREATOR_POST_SELECTORS.container[0]
-    const authWall = await detectAuthWall(page, primaryContentSelector)
+    const authWall = await detectAuthWall(page, authWallCheckSelector)
     if (authWall.auth_wall) {
       console.warn(`[readCreatorPosts] Auth wall detected for profile ${profile_id}: ${authWall.reason}`)
       await captureFailureSnapshot(page, 'read-creator-posts', profile_id, 'auth_wall', authWall.reason ?? undefined)

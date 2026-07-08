@@ -281,3 +281,16 @@ export const AUTH_WALL_SELECTORS = {
     'div[data-test-id="challenge-page"]',
   ] as const,
 } as const
+
+/**
+ * LinkedIn's persistent logged-in site chrome (nav bar), confirmed present
+ * (as `#primary-nav`) on a real authenticated session even when a page's own
+ * content selectors (e.g. FEED_POST_SELECTORS.container) haven't matched yet
+ * or are stale against current markup. Used ONLY to widen auth-wall
+ * classification's "is there real content" check — never as a substitute for
+ * the real per-action content selectors used for actual data extraction, so
+ * extraction-confidence reporting stays honest about what was actually
+ * extracted (Canon H1.4). This is what lets "are we logged in" stay reliable
+ * independent of feed/profile/inbox selector drift.
+ */
+export const LOGIN_CONFIRMED_MARKERS = ['#primary-nav'] as const

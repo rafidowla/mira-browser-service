@@ -17,9 +17,9 @@
 import type { Page } from 'playwright'
 import { contextManager } from '../lib/context'
 import { humanDelay, jitter, TimingConfig } from '../lib/timing'
-import { extractField, INBOX_SELECTORS } from '../lib/selector-registry'
+import { extractField, INBOX_SELECTORS, LOGIN_CONFIRMED_MARKERS } from '../lib/selector-registry'
 import { computeConfidence, shouldSnapshotOnLowConfidence, type ExtractionConfidence, type FieldOutcome } from '../lib/confidence'
-import { detectAuthWall, captureFailureSnapshot } from '../lib/read-action-support'
+import { detectAuthWall, captureFailureSnapshot, waitForPageSettled } from '../lib/read-action-support'
 import type { AuthWallReason } from '../lib/auth-wall'
 
 /** Summary of a single LinkedIn messaging conversation from the operator's own inbox. */
@@ -157,10 +157,13 @@ export async function readInbox(
     console.log(`[readInbox] Navigating to inbox for profile ${profile_id}`)
 
     await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
+
+    // Widened with LOGIN_CONFIRMED_MARKERS — see read-feed.ts for why.
+    const authWallCheckSelector = [...INBOX_SELECTORS.container, ...LOGIN_CONFIRMED_MARKERS].join(', ')
+    await waitForPageSettled(page, authWallCheckSelector)
     await humanDelay(timing.page_read_delay)
 
-    const primaryContentSelector = INBOX_SELECTORS.container[0]
-    const authWall = await detectAuthWall(page, primaryContentSelector)
+    const authWall = await detectAuthWall(page, authWallCheckSelector)
     if (authWall.auth_wall) {
       console.warn(`[readInbox] Auth wall detected for profile ${profile_id}: ${authWall.reason}`)
       await captureFailureSnapshot(page, 'read-inbox', profile_id, 'auth_wall', authWall.reason ?? undefined)

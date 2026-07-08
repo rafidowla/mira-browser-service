@@ -17,9 +17,9 @@
 import type { Page } from 'playwright'
 import { contextManager } from '../lib/context'
 import { humanDelay, jitter, TimingConfig } from '../lib/timing'
-import { extractField, FEED_POST_SELECTORS } from '../lib/selector-registry'
+import { extractField, FEED_POST_SELECTORS, LOGIN_CONFIRMED_MARKERS } from '../lib/selector-registry'
 import { computeConfidence, shouldSnapshotOnLowConfidence, type ExtractionConfidence, type FieldOutcome } from '../lib/confidence'
-import { detectAuthWall, captureFailureSnapshot } from '../lib/read-action-support'
+import { detectAuthWall, captureFailureSnapshot, waitForPageSettled } from '../lib/read-action-support'
 import type { AuthWallReason } from '../lib/auth-wall'
 
 /** Structured representation of a single LinkedIn feed post. */
@@ -198,10 +198,20 @@ export async function readFeed(
     console.log(`[readFeed] Navigating to feed for profile ${profile_id}`)
 
     await page.goto(FEED_URL, { waitUntil: "domcontentloaded", timeout: 30000 })
+
+    // Full fallback chain, not just container[0] — otherwise a page whose
+    // posts only match selector #2/#3 misreports as an empty authed shell.
+    // Also widen with LOGIN_CONFIRMED_MARKERS (LinkedIn's stable nav chrome):
+    // a real logged-in session can render the nav well before feed posts
+    // finish loading (ads, slow XHRs), so requiring an actual post to appear
+    // before saying "not an auth wall" produced false empty_authed_shell
+    // reports on a genuinely-connected account. Extraction below still uses
+    // FEED_POST_SELECTORS.container only, so confidence reporting stays honest.
+    const authWallCheckSelector = [...FEED_POST_SELECTORS.container, ...LOGIN_CONFIRMED_MARKERS].join(', ')
+    await waitForPageSettled(page, authWallCheckSelector)
     await humanDelay(timing.page_read_delay)
 
-    const primaryContentSelector = FEED_POST_SELECTORS.container[0]
-    const authWall = await detectAuthWall(page, primaryContentSelector)
+    const authWall = await detectAuthWall(page, authWallCheckSelector)
     if (authWall.auth_wall) {
       console.warn(`[readFeed] Auth wall detected for profile ${profile_id}: ${authWall.reason}`)
       await captureFailureSnapshot(page, 'read-feed', profile_id, 'auth_wall', authWall.reason ?? undefined)
