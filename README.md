@@ -68,12 +68,14 @@ unchanged.
 
 ## Configuration
 
-| Variable         | Default | Description                                |
-|------------------|---------|--------------------------------------------|
-| `PORT`           | `3001`  | Port the service listens on                |
-| `MIRA_API_TOKEN` | —       | Shared secret with the MIRA app. Required. |
-| `MAX_PROFILES`   | `5`     | Max concurrent browser profiles            |
-| `LOG_LEVEL`      | `info`  | Logging verbosity: `debug`, `info`, `warn` |
+| Variable                   | Default | Description                                |
+|----------------------------|---------|--------------------------------------------|
+| `PORT`                     | `3001`  | Port the service listens on                |
+| `MIRA_API_TOKEN`           | —       | Shared secret with the MIRA app. Required. |
+| `MAX_PROFILES`             | `5`     | Max concurrent browser profiles            |
+| `LOG_LEVEL`                | `info`  | Logging verbosity: `debug`, `info`, `warn` |
+| `MIRA_ACTIVE_HOURS_START`  | `8`     | Hour (0-24, THIS machine's local time) automation is allowed to start. Each install runs on its own operator's machine — no timezone coordination needed. |
+| `MIRA_ACTIVE_HOURS_END`    | `20`    | Hour (0-24) after which automation stops. Must be greater than START. |
 
 ## Architecture
 

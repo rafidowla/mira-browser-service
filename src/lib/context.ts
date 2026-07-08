@@ -71,6 +71,51 @@ export interface ProfileContext {
 const SESSIONS_ROOT = path.join(process.cwd(), "sessions")
 
 /**
+ * Reads MIRA_ACTIVE_HOURS_START / MIRA_ACTIVE_HOURS_END from the environment
+ * and validates them. Active hours are a per-OPERATOR setting, not a global
+ * constant — MIRA runs entirely on each operator's own machine, in their own
+ * timezone (the check itself already reads that machine's local clock; see
+ * isWithinActiveHours). A single hardcoded 8am-8pm window doesn't fit every
+ * operator's actual daytime — flagged 2026-07-08 when a tester in a different
+ * timezone was blocked by the fixed default outside his own normal hours.
+ *
+ * @returns The override {start, end}, or null if unset/invalid (falls back
+ *   to DEFAULT_TIMING's 8-20). Invalid values are logged, never thrown —
+ *   a config typo must not crash the whole service.
+ */
+function resolveActiveHoursOverride(): { start: number; end: number } | null {
+  const startRaw = process.env.MIRA_ACTIVE_HOURS_START
+  const endRaw = process.env.MIRA_ACTIVE_HOURS_END
+  if (startRaw === undefined && endRaw === undefined) return null
+
+  const start = startRaw !== undefined ? Number(startRaw) : DEFAULT_TIMING.active_hours.start
+  const end = endRaw !== undefined ? Number(endRaw) : DEFAULT_TIMING.active_hours.end
+  const valid =
+    Number.isInteger(start) && Number.isInteger(end) &&
+    start >= 0 && start <= 24 && end >= 0 && end <= 24 && start < end
+  if (!valid) {
+    console.warn(
+      `[ContextManager] Ignoring invalid MIRA_ACTIVE_HOURS_START/END ` +
+      `("${startRaw}"/"${endRaw}") — start must be < end, both 0-24. ` +
+      `Falling back to the default ${DEFAULT_TIMING.active_hours.start}-${DEFAULT_TIMING.active_hours.end}.`
+    )
+    return null
+  }
+  return { start, end }
+}
+
+/**
+ * DEFAULT_TIMING with any MIRA_ACTIVE_HOURS_* environment override applied.
+ * Use this instead of importing DEFAULT_TIMING directly wherever active
+ * hours are checked (server.ts's gates, initProfile's no-overrides fallback)
+ * so the operator's configured window is honoured consistently everywhere.
+ */
+export const EFFECTIVE_DEFAULT_TIMING: TimingConfig = (() => {
+  const override = resolveActiveHoursOverride()
+  return override ? mergeTimingConfig(DEFAULT_TIMING, { active_hours: override }) : DEFAULT_TIMING
+})()
+
+/**
  * On-disk pacing state for a profile, written on session close and read on
  * the next session/init — deliberately on disk, not just in-memory, so the
  * inter-session gap survives a service restart (Canon: a same-day burst of
@@ -183,8 +228,8 @@ export class ContextManager {
     fs.mkdirSync(session_dir, { recursive: true })
 
     const timing_config = timing_overrides
-      ? mergeTimingConfig(DEFAULT_TIMING, timing_overrides)
-      : DEFAULT_TIMING
+      ? mergeTimingConfig(EFFECTIVE_DEFAULT_TIMING, timing_overrides)
+      : EFFECTIVE_DEFAULT_TIMING
 
     // Inter-session pacing gate — checked BEFORE launching, using on-disk
     // state from the PREVIOUS session's close (see PacingState above for why
@@ -445,7 +490,7 @@ export class ContextManager {
    * Deterministic: Yes. Side Effects: None.
    */
   getTimingConfig(profile_id: string): TimingConfig {
-    return this.contexts.get(profile_id)?.timing_config ?? DEFAULT_TIMING
+    return this.contexts.get(profile_id)?.timing_config ?? EFFECTIVE_DEFAULT_TIMING
   }
 
   /**

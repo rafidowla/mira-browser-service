@@ -20,8 +20,8 @@
 import 'dotenv/config'
 import express, { Request, Response, NextFunction } from 'express'
 import type { TaskRequest, TaskResponse, AuditEntry, SessionStatus } from './types'
-import { DEFAULT_TIMING, mergeTimingConfig, isWithinActiveHours } from './lib/timing'
-import { contextManager } from './lib/context'
+import { mergeTimingConfig, isWithinActiveHours } from './lib/timing'
+import { contextManager, EFFECTIVE_DEFAULT_TIMING } from './lib/context'
 import type { TimingConfig } from './lib/timing'
 import { getAuditLog, logAudit } from './lib/audit'
 import { readFeed } from './actions/read-feed'
@@ -137,16 +137,16 @@ function requireToken(req: Request, res: Response, next: NextFunction): void {
 /**
  * GET /timing/defaults
  *
- * Purpose: Returns the DEFAULT_TIMING configuration as JSON.
- * No auth required — transparency is part of the trust model.
- * Operators can inspect exactly what timing cadences MIRA applies
- * to their browser sessions without needing to read source code.
+ * Purpose: Returns the EFFECTIVE default timing configuration as JSON —
+ * DEFAULT_TIMING with any MIRA_ACTIVE_HOURS_* env override applied, so an
+ * operator sees the window that's actually in force, not just the code
+ * default. No auth required — transparency is part of the trust model.
  *
- * Returns: DEFAULT_TIMING object (TimingConfig).
+ * Returns: EFFECTIVE_DEFAULT_TIMING object (TimingConfig).
  * Side Effects: None.
  */
 app.get('/timing/defaults', (_req: Request, res: Response): void => {
-  res.json(DEFAULT_TIMING)
+  res.json(EFFECTIVE_DEFAULT_TIMING)
 })
 
 /**
@@ -190,7 +190,7 @@ app.post('/session/init', requireToken, (req: Request, res: Response): void => {
   // Active-hours gate, checked BEFORE launching — a session starting outside
   // normal daytime hours is itself an automation tell, independent of what
   // happens once the browser is open.
-  const effectiveTiming = timing_overrides ? mergeTimingConfig(DEFAULT_TIMING, timing_overrides) : DEFAULT_TIMING
+  const effectiveTiming = timing_overrides ? mergeTimingConfig(EFFECTIVE_DEFAULT_TIMING, timing_overrides) : EFFECTIVE_DEFAULT_TIMING
   if (!isWithinActiveHours(effectiveTiming)) {
     res.status(403).json({ error: activeHoursMessage(effectiveTiming) })
     return
