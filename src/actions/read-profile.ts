@@ -111,6 +111,8 @@ export async function readProfile(
   let page: Page | null = null
   try {
     page = await context.newPage() as unknown as Page
+    // Bring to front — see read-feed.ts for why (avoids background-tab throttling).
+    await page.bringToFront().catch(() => undefined)
     await page.goto(target_profile_url, { waitUntil: "domcontentloaded", timeout: 30000 })
     await waitForPageSettled(page, PROFILE_PRIMARY_CONTAINER)
     await humanDelay(timing.page_read_delay)

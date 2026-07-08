@@ -169,6 +169,8 @@ export async function readComments(
   let page: Page | null = null
   try {
     page = await context.newPage() as unknown as Page
+    // Bring to front — see read-feed.ts for why (avoids background-tab throttling).
+    await page.bringToFront().catch(() => undefined)
     await page.goto(post_url, { waitUntil: "domcontentloaded", timeout: 30000 })
 
     // Widened with LOGIN_CONFIRMED_MARKERS — see read-feed.ts for why (a real

@@ -195,6 +195,12 @@ export async function readFeed(
   let page: Page | null = null
   try {
     page = await context.newPage() as unknown as Page
+    // Bring to front — a backgrounded tab gets Chrome's reduced-priority
+    // throttling (delayed timers/rendering), which can make LinkedIn's SPA
+    // content take far longer to hydrate than a foregrounded tab (observed
+    // live: page.$() found nothing for the full poll window while a
+    // snapshot moments later showed the content present).
+    await page.bringToFront().catch(() => undefined)
     console.log(`[readFeed] Navigating to feed for profile ${profile_id}`)
 
     await page.goto(FEED_URL, { waitUntil: "domcontentloaded", timeout: 30000 })

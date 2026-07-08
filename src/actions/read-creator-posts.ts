@@ -173,6 +173,8 @@ export async function readCreatorPosts(
     const activityUrl = `${base}/recent-activity/all/`
 
     page = await context.newPage() as unknown as Page
+    // Bring to front — see read-feed.ts for why (avoids background-tab throttling).
+    await page.bringToFront().catch(() => undefined)
     console.log(`[readCreatorPosts] Navigating to ${activityUrl}`)
     await page.goto(activityUrl, { waitUntil: "domcontentloaded", timeout: 30000 })
 

@@ -154,6 +154,8 @@ export async function readInbox(
   let page: Page | null = null
   try {
     page = await context.newPage() as unknown as Page
+    // Bring to front — see read-feed.ts for why (avoids background-tab throttling).
+    await page.bringToFront().catch(() => undefined)
     console.log(`[readInbox] Navigating to inbox for profile ${profile_id}`)
 
     await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 30000 })
