@@ -331,6 +331,21 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
           const url = typeof params.url === 'string' ? params.url : ''
           if (!url) return { success: false, error: 'Missing params.url' }
           const data = await openUrl(profile_id, url, timing)
+          // data.opened can be false (no active context, mutex busy, nav error)
+          // without openUrl() ever throwing — this used to be reported as
+          // success regardless, so the button looked "unresponsive" with no
+          // error shown (confirmed via pilot report 2026-07-10: no window
+          // opened, no message, session had gone stale in the background).
+          if (!data.opened) {
+            logAudit({ profile_id, action, result: 'failure', detail: data.reason })
+            const message =
+              data.reason === 'mutex_blocked'
+                ? 'The browser is busy with another action — try again in a moment.'
+                : data.reason === 'navigation_error'
+                  ? 'Could not load that page in the browser window.'
+                  : 'No active LinkedIn session — connect LinkedIn first, then try again.'
+            return { success: false, error: message, data }
+          }
           logAudit({ profile_id, action, result: 'success' })
           return { success: true, data }
         }
