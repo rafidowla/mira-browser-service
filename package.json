@@ -7,7 +7,7 @@
     "dev": "ts-node-dev --respawn src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "ts-node src/lib/timing.test.ts && ts-node src/lib/selector-registry.test.ts && ts-node src/lib/confidence.test.ts && ts-node src/lib/auth-wall.test.ts && ts-node src/lib/snapshot.test.ts"
+    "test": "ts-node src/lib/timing.test.ts && ts-node src/lib/selector-registry.test.ts && ts-node src/lib/confidence.test.ts && ts-node src/lib/auth-wall.test.ts && ts-node src/lib/snapshot.test.ts && ts-node src/lib/login-check.test.ts"
   },
   "dependencies": {
     "cloakbrowser": "^0.4.8",

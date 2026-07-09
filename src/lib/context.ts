@@ -67,6 +67,59 @@ export interface ProfileContext {
   session_action_budget: number
 }
 
+/**
+ * Result of the navigation-free LinkedIn login check (getLinkedInLoginState).
+ * `diagnostics` is deliberately verbose so a "still not connected" pilot
+ * report is actionable (present-but-expired vs. absent cookie vs. no context)
+ * instead of another round of guessing.
+ */
+export interface LinkedInLoginState {
+  logged_in: boolean
+  reason: 'no_context' | 'no_li_at' | 'cookie_expired' | 'check_error' | null
+  diagnostics: {
+    context_exists: boolean
+    li_at_present?: boolean
+    li_at_expired?: boolean
+    linkedin_cookie_count?: number
+    error?: string
+  }
+}
+
+/** Minimal cookie shape (subset of Playwright's Cookie) needed for the login check. */
+export interface LoginCookie {
+  name: string
+  value: string
+  /** Unix seconds; -1 (or <= 0) means a session cookie with no expiry. */
+  expires: number
+}
+
+/**
+ * Pure evaluation of a LinkedIn cookie set into a login verdict — extracted
+ * from getLinkedInLoginState so the logic (present / absent / expired) is
+ * unit-testable without launching a real browser. `li_at` is LinkedIn's
+ * primary auth cookie; its presence with a non-past expiry is the ground
+ * truth for "logged in."
+ *
+ * @param cookies - Cookies for the linkedin.com domain from the context jar.
+ * @param nowMs - Current time in ms (injectable for deterministic tests).
+ */
+export function evaluateLoginCookies(cookies: LoginCookie[], nowMs: number): LinkedInLoginState {
+  const liAt = cookies.find((c) => c.name === 'li_at')
+  const nowSec = nowMs / 1000
+  const expired = liAt ? liAt.expires > 0 && liAt.expires < nowSec : false
+  const logged_in = Boolean(liAt && liAt.value && !expired)
+  return {
+    logged_in,
+    reason: logged_in ? null : liAt ? 'cookie_expired' : 'no_li_at',
+    diagnostics: {
+      context_exists: true,
+      li_at_present: Boolean(liAt),
+      li_at_expired: expired,
+      linkedin_cookie_count: cookies.length,
+    },
+  }
+}
+
 /** Base session directory — all profile dirs are children of this. */
 const SESSIONS_ROOT = path.join(process.cwd(), "sessions")
 
@@ -477,6 +530,51 @@ export class ContextManager {
    */
   getContext(profile_id: string): BrowserContext | null {
     return this.contexts.get(profile_id)?.context ?? null
+  }
+
+  /**
+   * Navigation-free LinkedIn login check: inspects the profile's persistent
+   * cookie jar for a valid `li_at` (LinkedIn's primary auth cookie, the
+   * ground truth for "is this session logged in").
+   *
+   * Why this exists (2026-07-11): the connection check used to piggyback on
+   * read-feed — navigate to the feed, then run auth-wall detection against a
+   * feed-post-container selector that the read-feed code itself notes "won't
+   * reliably match even on a confirmed-rendered, logged-in feed." A slow SPA
+   * render, selector drift, or LinkedIn's `uc=scraping` bot-check serving a
+   * checkpoint all produced a FALSE "not connected" for a user who had in
+   * fact just logged in — the exact symptom a pilot tester hit on every
+   * build. Cookie presence is the authoritative signal and needs zero
+   * LinkedIn navigation, so it also removes the detection surface (and the
+   * action-budget/active-hours cost) of scraping the feed just to check login.
+   *
+   * `li_at` is HttpOnly, so `context.cookies()` (the browser cookie jar, which
+   * includes HttpOnly) sees it even though page JS can't. A present-but-stale
+   * `li_at` (LinkedIn invalidated it server-side while it lingers in the jar)
+   * can still read logged_in:true here — that's an acceptable, far rarer
+   * failure than the current false-negative, and a real scan's own auth-wall
+   * detection catches the stale case at scan time.
+   *
+   * @param profile_id - Profile whose cookie jar to inspect.
+   * @returns LinkedInLoginState with logged_in + a diagnostics bundle (so a
+   *   failure is actionable in a pilot report, not another guess). Never
+   *   throws — a cookie-read failure becomes logged_in:false + reason.
+   *
+   * Side Effects: None (reads the in-memory/on-disk cookie jar; no navigation).
+   */
+  async getLinkedInLoginState(profile_id: string): Promise<LinkedInLoginState> {
+    const profileCtx = this.contexts.get(profile_id)
+    if (!profileCtx || !profileCtx.context) {
+      return { logged_in: false, reason: 'no_context', diagnostics: { context_exists: false } }
+    }
+    try {
+      const cookies = await profileCtx.context.cookies('https://www.linkedin.com')
+      return evaluateLoginCookies(cookies as LoginCookie[], Date.now())
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[ContextManager] Login cookie check failed for ${profile_id}: ${message}`)
+      return { logged_in: false, reason: 'check_error', diagnostics: { context_exists: true, error: message } }
+    }
   }
 
   /**

@@ -225,6 +225,35 @@ app.post('/session/status', requireToken, (req: Request, res: Response): void =>
 })
 
 /**
+ * POST /session/login-check
+ *
+ * Navigation-free LinkedIn login check — inspects the profile's persistent
+ * cookie jar for a valid `li_at`, the authoritative "logged in" signal. This
+ * is NOT a whitelisted LinkedIn action (it never navigates or scrapes
+ * LinkedIn, so it stays cleanly outside the reads-only whitelist / I-6 gate),
+ * and it deliberately does NOT go through /task — so it never consumes the
+ * session action budget and is never blocked by the active-hours gate, unlike
+ * the old read-feed-based connection probe it replaces (2026-07-11).
+ *
+ * Body: { profile_id }
+ * Returns: LinkedInLoginState { logged_in, reason, diagnostics }.
+ */
+app.post('/session/login-check', requireToken, (req: Request, res: Response): void => {
+  const { profile_id } = req.body as { profile_id: string }
+  if (!profile_id) {
+    res.status(400).json({ error: 'Missing profile_id' })
+    return
+  }
+  contextManager
+    .getLinkedInLoginState(profile_id)
+    .then((state) => res.json(state))
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Login check failed'
+      res.status(500).json({ logged_in: false, reason: 'check_error', diagnostics: { context_exists: false, error: message } })
+    })
+})
+
+/**
  * Builds the common TaskResponse shape for a read action, given its extracted
  * items, ExtractionConfidence report, and auth-wall state (Canon H1.4).
  *
