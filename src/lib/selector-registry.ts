@@ -265,6 +265,28 @@ export const INBOX_SELECTORS = {
 } as const
 
 /**
+ * Selector chain for the per-conversation "more options" overflow control on
+ * an OPEN conversation thread (archiveMessage) — reveals a dropdown menu
+ * that contains an "Archive" item, found separately by visible text (see
+ * archive-message.ts) since LinkedIn's menu-item CSS classes churn more
+ * than their visible English labels.
+ *
+ * UNVERIFIED — written blind against no live LinkedIn session, same
+ * starting point as every other selector chain in this file (Canon H1.4).
+ * This is the FIRST-EVER write-action selector in the codebase; expect it
+ * to need at least one live test-account pass before it can be trusted —
+ * do not treat a clean typecheck/unit-test pass as proof this clicks the
+ * right thing on real LinkedIn.
+ */
+export const INBOX_ARCHIVE_SELECTORS = {
+  more_options_button: [
+    'button[aria-label="More options"]',
+    'button.msg-thread-actions__control',
+    '[data-control-name="overflow"]',
+  ] as const,
+} as const
+
+/**
  * Auth-wall / logged-out DOM markers, kept here (not in auth-wall.ts) as they
  * are also selector chains subject to the same live-tuning workflow — see
  * auth-wall.ts for the classification logic that consumes these.

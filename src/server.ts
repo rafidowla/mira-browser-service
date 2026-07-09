@@ -30,6 +30,7 @@ import { readProfile } from './actions/read-profile'
 import { readCreatorPosts } from './actions/read-creator-posts'
 import { openUrl } from './actions/open-url'
 import { readInbox } from './actions/read-inbox'
+import { archiveMessage } from './actions/archive-message'
 import type { ExtractionConfidence } from './lib/confidence'
 import type { AuthWallReason } from './lib/auth-wall'
 import { AUTH_WALL_REASON_DETAIL } from './lib/auth-wall'
@@ -356,6 +357,32 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
           const limit = typeof params.limit === 'number' ? params.limit : undefined
           const result = await readInbox(profile_id, timing, limit)
           return finishReadAction(profile_id, action, result.conversations, result.confidence, result.auth_wall, result.auth_wall_reason)
+        }
+        case 'archive-message': {
+          // FIRST-EVER write action (Canon I-6 scoped review,
+          // docs/mira-inbox-archive-write-review-2026-07-10.md in the mira
+          // repo, 2026-07-10). Archives one already-flagged-junk inbox
+          // conversation. Human-triggered only — the app calls this once per
+          // conversation in a capped batch, never from a scan/read path.
+          const conversation_url = typeof params.conversation_url === 'string' ? params.conversation_url : ''
+          if (!conversation_url) return { success: false, error: 'Missing params.conversation_url' }
+          const data = await archiveMessage(profile_id, conversation_url, timing)
+          if (!data.archived) {
+            logAudit({ profile_id, action, result: 'failure', detail: data.reason })
+            const message =
+              data.reason === 'mutex_blocked'
+                ? 'The browser is busy with another action — try again in a moment.'
+                : data.reason === 'auth_wall'
+                  ? 'LinkedIn session looks logged out — reconnect, then try again.'
+                  : data.reason === 'control_not_found'
+                    ? "Couldn't find LinkedIn's archive control on this conversation."
+                    : data.reason === 'no_context'
+                      ? 'No active LinkedIn session — connect LinkedIn first, then try again.'
+                      : 'Could not archive this conversation.'
+            return { success: false, error: message, data }
+          }
+          logAudit({ profile_id, action, result: 'success' })
+          return { success: true, data }
         }
         default:
           return { success: false, error: `Unknown action: ${action}` }
