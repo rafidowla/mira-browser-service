@@ -305,14 +305,25 @@ export const AUTH_WALL_SELECTORS = {
 } as const
 
 /**
- * LinkedIn's persistent logged-in site chrome (nav bar), confirmed present
- * (as `#primary-nav`) on a real authenticated session even when a page's own
- * content selectors (e.g. FEED_POST_SELECTORS.container) haven't matched yet
- * or are stale against current markup. Used ONLY to widen auth-wall
- * classification's "is there real content" check — never as a substitute for
- * the real per-action content selectors used for actual data extraction, so
- * extraction-confidence reporting stays honest about what was actually
- * extracted (Canon H1.4). This is what lets "are we logged in" stay reliable
- * independent of feed/profile/inbox selector drift.
+ * LinkedIn's persistent logged-in site chrome, used ONLY to widen auth-wall
+ * classification's "is there real content / are we logged in" check — never as
+ * a substitute for the per-action content selectors used for actual data
+ * extraction, so extraction-confidence stays honest (Canon H1.4). This is what
+ * lets "are we logged in" stay reliable independent of feed/profile/inbox
+ * selector drift, so a genuinely EMPTY or quiet feed (logged in, but no posts —
+ * e.g. a fresh account with 0 connections) is reported as 0 items, not
+ * misclassified as `empty_authed_shell` ("expired session").
+ *
+ * SEMANTIC, not class-based (changed 2026-07-10). Live H1.4 validation on the
+ * test account found LinkedIn serving this account fully OBFUSCATED, hashed CSS
+ * class names (`_008375bd`, `dec34939`, …) — `#primary-nav`, `artdeco*`,
+ * `feed-shared-update*` and every stable class was ABSENT from the real DOM, so
+ * the old `#primary-nav` marker never matched and every quiet feed tripped a
+ * false `empty_authed_shell`. Semantic HTML survives class obfuscation, so we
+ * anchor on the logged-in app shell's semantic landmarks (`<nav>`, `<main>`)
+ * instead, with `#primary-nav` kept as a fallback for any non-obfuscated
+ * variant. NOTE: this fixes "are we logged in / is the feed just empty" — it
+ * does NOT fix DATA EXTRACTION, which still relies on the (obfuscated-away)
+ * class selectors and needs its own semantic/aria/role-based rework (open H1.4).
  */
-export const LOGIN_CONFIRMED_MARKERS = ['#primary-nav'] as const
+export const LOGIN_CONFIRMED_MARKERS = ['nav', 'main', '#primary-nav'] as const
