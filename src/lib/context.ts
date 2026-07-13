@@ -158,14 +158,48 @@ function resolveActiveHoursOverride(): { start: number; end: number } | null {
 }
 
 /**
- * DEFAULT_TIMING with any MIRA_ACTIVE_HOURS_* environment override applied.
- * Use this instead of importing DEFAULT_TIMING directly wherever active
- * hours are checked (server.ts's gates, initProfile's no-overrides fallback)
- * so the operator's configured window is honoured consistently everywhere.
+ * Whether MIRA_TEST_MODE is on. When set, the bot-pacing gates are RELAXED so a
+ * pilot on a DISPOSABLE test account can actually iterate (connect → scan →
+ * repeat) instead of being locked out for 90-240 minutes after ~8-15 actions.
+ * Accepts true/1/yes (case-insensitive). MUST be off for the founder's real
+ * account (that's what the pacing protects).
+ */
+function isTestMode(): boolean {
+  const raw = (process.env.MIRA_TEST_MODE ?? '').toLowerCase().trim()
+  return raw === 'true' || raw === '1' || raw === 'yes'
+}
+
+/**
+ * DEFAULT_TIMING with any MIRA_ACTIVE_HOURS_* override applied, then — if
+ * MIRA_TEST_MODE is on — the bot-pacing gates relaxed for test-account
+ * validation. Use this instead of importing DEFAULT_TIMING directly wherever
+ * pacing/active-hours are checked (server.ts's gates, initProfile) so the
+ * effective config is honoured consistently everywhere.
+ *
+ * MIRA_TEST_MODE only affects READ PACING on a throwaway account (Canon I-5 —
+ * a banned test account is a learning event). It does NOT touch drafts-first,
+ * the reads-only whitelist, or anything on the real account. The pacing gates
+ * exist because LinkedIn tagged this stack `uc=scraping` once (PENDING §2); on
+ * a disposable validation account, being unable to test at all is the worse
+ * failure, so we trade the pacing for iterability there and keep it full for
+ * the real account.
  */
 export const EFFECTIVE_DEFAULT_TIMING: TimingConfig = (() => {
   const override = resolveActiveHoursOverride()
-  return override ? mergeTimingConfig(DEFAULT_TIMING, { active_hours: override }) : DEFAULT_TIMING
+  let timing = override ? mergeTimingConfig(DEFAULT_TIMING, { active_hours: override }) : DEFAULT_TIMING
+  if (isTestMode()) {
+    console.warn(
+      '[ContextManager] MIRA_TEST_MODE is ON — bot-pacing RELAXED (active hours 24/7, ' +
+      'no inter-session gap, high per-session action budget). Use ONLY on a disposable ' +
+      'test account, NEVER the real account.'
+    )
+    timing = mergeTimingConfig(timing, {
+      active_hours: { start: 0, end: 24 },
+      inter_session_gap: { min: 0, max: 0 },
+      max_actions_per_session: { min: 1000, max: 1000 },
+    })
+  }
+  return timing
 })()
 
 /**
