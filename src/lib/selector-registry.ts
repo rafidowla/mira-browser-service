@@ -301,6 +301,16 @@ export const AUTH_WALL_SELECTORS = {
     '#challenge-form',
     '.challenge-dialog',
     'div[data-test-id="challenge-page"]',
+    // Bot-check / CAPTCHA widgets — attribute/id based so they survive the
+    // class-name obfuscation that defeats the three above (2026-07-11: a
+    // PerimeterX bot-check was misread as a quiet feed). px-captcha is
+    // PerimeterX's stable container id; the iframe matches catch embedded
+    // captcha/verification challenges by src/title, not by churny classes.
+    '#px-captcha',
+    '[id*="captcha" i]',
+    'iframe[src*="captcha" i]',
+    'iframe[title*="human" i]',
+    'iframe[title*="verification" i]',
   ] as const,
 } as const
 
