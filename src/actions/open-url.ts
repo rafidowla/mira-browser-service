@@ -28,6 +28,8 @@ export interface OpenUrlResult {
   opened: boolean
   /** The URL that was opened (echoed back). */
   url: string
+  /** Why `opened` is false — absent when opened is true. */
+  reason?: 'no_context' | 'mutex_blocked' | 'navigation_error'
 }
 
 /**
@@ -36,7 +38,7 @@ export interface OpenUrlResult {
  * @param profile_id - MIRA profile with an active browser context.
  * @param target_url - Full URL to open (a LinkedIn post or profile).
  * @param timing - TimingConfig for a small human-like settle delay.
- * @returns OpenUrlResult. { opened: false } if no context / mutex blocked / error.
+ * @returns OpenUrlResult. { opened: false, reason } if no context / mutex blocked / error.
  *
  * Side Effects: Opens a new page (left open) and brings it to front.
  * Error Behavior: Catches all errors — never throws.
@@ -49,11 +51,11 @@ export async function openUrl(
   const context = contextManager.getContext(profile_id)
   if (!context) {
     console.warn(`[openUrl] No context for profile ${profile_id}`)
-    return { opened: false, url: target_url }
+    return { opened: false, url: target_url, reason: 'no_context' }
   }
   if (!contextManager.acquireMutex(profile_id)) {
     console.warn(`[openUrl] Mutex blocked for profile ${profile_id}`)
-    return { opened: false, url: target_url }
+    return { opened: false, url: target_url, reason: 'mutex_blocked' }
   }
 
   try {
@@ -67,7 +69,7 @@ export async function openUrl(
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)
     console.error(`[openUrl] Error: ${message}`)
-    return { opened: false, url: target_url }
+    return { opened: false, url: target_url, reason: 'navigation_error' }
   } finally {
     // Release the mutex immediately; the page stays open independently.
     contextManager.releaseMutex(profile_id)

@@ -71,8 +71,22 @@ const LOGIN_BODY_MARKERS = [
 const CHECKPOINT_BODY_MARKERS = [
   'quick security check',
   'verify you\'re a human',
+  'verify you are human',
   'unusual activity',
   'help us protect your account',
+  // PerimeterX / bot-check signals. These are TEXT-based on purpose: LinkedIn
+  // serves this account fully class-obfuscated (hashed classnames — PENDING
+  // §3f), so the class/id checkpoint selectors can miss the challenge entirely
+  // and a bot-check page then reads as a "quiet feed" (2026-07-11 detection
+  // event: forced sign-out + CAPTCHA after every scan, reported as "0 posts").
+  // Visible text survives class obfuscation. Chosen to not appear on a real
+  // feed. NOTE: refine against the actual captured snapshot when available.
+  'press & hold',
+  'press and hold',
+  'are you a robot',
+  'complete a quick security check',
+  'we detected unusual',
+  'automated access',
 ] as const
 
 /**

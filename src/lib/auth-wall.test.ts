@@ -102,6 +102,26 @@ export function runTests(): TestResult {
   }
 
   // -----------------------------------------------------------------------
+  // Test 4b: PerimeterX bot-check on the FEED URL with a logged-in nav present
+  // and NO class-based challenge marker (obfuscated) — must still be caught as
+  // a checkpoint via body text, NOT misread as a "logged-in quiet feed"
+  // (2026-07-11 detection event). This is the case the class markers miss.
+  // -----------------------------------------------------------------------
+  console.log('\nTest 4b: classifyAuthWall() — captcha bot-check via body text, obfuscated markup')
+  {
+    const result = classifyAuthWall({
+      ...BASE_SIGNALS,
+      url: 'https://www.linkedin.com/feed/',
+      title: 'LinkedIn',
+      bodyTextSample: 'Please verify you are human. Press & Hold to continue.',
+      hasChallengeMarker: false, // class-based marker obfuscated/absent
+      hasPrimaryContentContainer: true, // nav/main present → would otherwise read "quiet feed"
+    })
+    assert('auth_wall is true (not misread as quiet feed)', result.auth_wall === true)
+    assert('reason is "checkpoint"', result.reason === 'checkpoint')
+  }
+
+  // -----------------------------------------------------------------------
   // Test 5: checkpoint takes precedence over login when both markers present
   // -----------------------------------------------------------------------
   console.log('\nTest 5: classifyAuthWall() — checkpoint precedence over login markers')

@@ -6,7 +6,12 @@
  * browser fingerprint, and timing configuration. A mutex ensures only one
  * profile executes actions at a time, preventing browser resource contention.
  *
- * Uses playwright-extra with the stealth plugin to reduce bot-detection signals.
+ * Uses CloakBrowser (source-level fingerprint-patched Chromium) as the browser
+ * engine. CloakBrowser is a drop-in Playwright replacement whose C++ patches
+ * neutralise canvas/WebGL/audio fingerprinting, GPU/hardware reporting, WebRTC
+ * leaks, and automation signals — a materially stronger anti-detection posture
+ * than the JS-level playwright-extra + stealth plugin it replaces. Pinned to the
+ * free v146 binary (see README); Pro/v148+ is not configured.
  *
  * Side Effects:
  *   - Creates ./sessions/{profile_id}/ directories on disk.
@@ -16,18 +21,21 @@
  * Deterministic: No (browser I/O). Concurrency: Mutex-protected per profile.
  */
 
-import { chromium } from 'playwright-extra'
 import type { BrowserContext } from 'playwright'
 import * as fs from 'fs'
 import * as path from 'path'
-import { DEFAULT_TIMING, mergeTimingConfig, TimingConfig } from './timing'
+import { DEFAULT_TIMING, mergeTimingConfig, TimingConfig, jitter } from './timing'
 import { generateFingerprint } from './fingerprint'
 import type { SessionStatus } from '../types'
 
-// stealth plugin: CJS default export — use require for safe interop
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any
-const StealthPlugin = require("puppeteer-extra-plugin-stealth") as any
-chromium.use(StealthPlugin())
+// cloakbrowser is an ESM-only package (its exports map has no `require`
+// condition). This service compiles to CommonJS, where a static `import` is
+// emitted as require() and throws ERR_PACKAGE_PATH_NOT_EXPORTED against
+// cloakbrowser. We load it via a genuine dynamic import() — wrapped in Function
+// so TypeScript's commonjs transform doesn't rewrite it back into require().
+const importCloakBrowser = new Function(
+  'return import("cloakbrowser")'
+) as () => Promise<typeof import('cloakbrowser')>
 
 /**
  * Complete runtime state for a managed browser profile.
@@ -48,10 +56,190 @@ export interface ProfileContext {
   last_active: Date | null
   /** Numeric seed derived from profile_id for fingerprint selection. */
   fingerprint_seed: number
+  /** Actions completed in this session so far — see recordAction(). */
+  actions_this_session: number
+  /**
+   * Randomised ceiling (from timing_config.max_actions_per_session) chosen
+   * once when this session was launched. Once actions_this_session reaches
+   * this, recordAction() signals the caller to close the session — a bounded
+   * burst of activity per session, not an open-ended one.
+   */
+  session_action_budget: number
+}
+
+/**
+ * Result of the navigation-free LinkedIn login check (getLinkedInLoginState).
+ * `diagnostics` is deliberately verbose so a "still not connected" pilot
+ * report is actionable (present-but-expired vs. absent cookie vs. no context)
+ * instead of another round of guessing.
+ */
+export interface LinkedInLoginState {
+  logged_in: boolean
+  reason: 'no_context' | 'no_li_at' | 'cookie_expired' | 'check_error' | null
+  diagnostics: {
+    context_exists: boolean
+    li_at_present?: boolean
+    li_at_expired?: boolean
+    linkedin_cookie_count?: number
+    error?: string
+  }
+}
+
+/** Minimal cookie shape (subset of Playwright's Cookie) needed for the login check. */
+export interface LoginCookie {
+  name: string
+  value: string
+  /** Unix seconds; -1 (or <= 0) means a session cookie with no expiry. */
+  expires: number
+}
+
+/**
+ * Pure evaluation of a LinkedIn cookie set into a login verdict — extracted
+ * from getLinkedInLoginState so the logic (present / absent / expired) is
+ * unit-testable without launching a real browser. `li_at` is LinkedIn's
+ * primary auth cookie; its presence with a non-past expiry is the ground
+ * truth for "logged in."
+ *
+ * @param cookies - Cookies for the linkedin.com domain from the context jar.
+ * @param nowMs - Current time in ms (injectable for deterministic tests).
+ */
+export function evaluateLoginCookies(cookies: LoginCookie[], nowMs: number): LinkedInLoginState {
+  const liAt = cookies.find((c) => c.name === 'li_at')
+  const nowSec = nowMs / 1000
+  const expired = liAt ? liAt.expires > 0 && liAt.expires < nowSec : false
+  const logged_in = Boolean(liAt && liAt.value && !expired)
+  return {
+    logged_in,
+    reason: logged_in ? null : liAt ? 'cookie_expired' : 'no_li_at',
+    diagnostics: {
+      context_exists: true,
+      li_at_present: Boolean(liAt),
+      li_at_expired: expired,
+      linkedin_cookie_count: cookies.length,
+    },
+  }
 }
 
 /** Base session directory — all profile dirs are children of this. */
 const SESSIONS_ROOT = path.join(process.cwd(), "sessions")
+
+/**
+ * Reads MIRA_ACTIVE_HOURS_START / MIRA_ACTIVE_HOURS_END from the environment
+ * and validates them. Active hours are a per-OPERATOR setting, not a global
+ * constant — MIRA runs entirely on each operator's own machine, in their own
+ * timezone (the check itself already reads that machine's local clock; see
+ * isWithinActiveHours). A single hardcoded 8am-8pm window doesn't fit every
+ * operator's actual daytime — flagged 2026-07-08 when a tester in a different
+ * timezone was blocked by the fixed default outside his own normal hours.
+ *
+ * @returns The override {start, end}, or null if unset/invalid (falls back
+ *   to DEFAULT_TIMING's 8-20). Invalid values are logged, never thrown —
+ *   a config typo must not crash the whole service.
+ */
+function resolveActiveHoursOverride(): { start: number; end: number } | null {
+  const startRaw = process.env.MIRA_ACTIVE_HOURS_START
+  const endRaw = process.env.MIRA_ACTIVE_HOURS_END
+  if (startRaw === undefined && endRaw === undefined) return null
+
+  const start = startRaw !== undefined ? Number(startRaw) : DEFAULT_TIMING.active_hours.start
+  const end = endRaw !== undefined ? Number(endRaw) : DEFAULT_TIMING.active_hours.end
+  const valid =
+    Number.isInteger(start) && Number.isInteger(end) &&
+    start >= 0 && start <= 24 && end >= 0 && end <= 24 && start < end
+  if (!valid) {
+    console.warn(
+      `[ContextManager] Ignoring invalid MIRA_ACTIVE_HOURS_START/END ` +
+      `("${startRaw}"/"${endRaw}") — start must be < end, both 0-24. ` +
+      `Falling back to the default ${DEFAULT_TIMING.active_hours.start}-${DEFAULT_TIMING.active_hours.end}.`
+    )
+    return null
+  }
+  return { start, end }
+}
+
+/**
+ * Whether MIRA_TEST_MODE is on. When set, the bot-pacing gates are RELAXED so a
+ * pilot on a DISPOSABLE test account can actually iterate (connect → scan →
+ * repeat) instead of being locked out for 90-240 minutes after ~8-15 actions.
+ * Accepts true/1/yes (case-insensitive). MUST be off for the founder's real
+ * account (that's what the pacing protects).
+ */
+function isTestMode(): boolean {
+  const raw = (process.env.MIRA_TEST_MODE ?? '').toLowerCase().trim()
+  return raw === 'true' || raw === '1' || raw === 'yes'
+}
+
+/**
+ * DEFAULT_TIMING with any MIRA_ACTIVE_HOURS_* override applied, then — if
+ * MIRA_TEST_MODE is on — the bot-pacing gates relaxed for test-account
+ * validation. Use this instead of importing DEFAULT_TIMING directly wherever
+ * pacing/active-hours are checked (server.ts's gates, initProfile) so the
+ * effective config is honoured consistently everywhere.
+ *
+ * MIRA_TEST_MODE only affects READ PACING on a throwaway account (Canon I-5 —
+ * a banned test account is a learning event). It does NOT touch drafts-first,
+ * the reads-only whitelist, or anything on the real account. The pacing gates
+ * exist because LinkedIn tagged this stack `uc=scraping` once (PENDING §2); on
+ * a disposable validation account, being unable to test at all is the worse
+ * failure, so we trade the pacing for iterability there and keep it full for
+ * the real account.
+ */
+export const EFFECTIVE_DEFAULT_TIMING: TimingConfig = (() => {
+  const override = resolveActiveHoursOverride()
+  let timing = override ? mergeTimingConfig(DEFAULT_TIMING, { active_hours: override }) : DEFAULT_TIMING
+  if (isTestMode()) {
+    console.warn(
+      '[ContextManager] MIRA_TEST_MODE is ON — bot-pacing RELAXED (active hours 24/7, ' +
+      'no inter-session gap, high per-session action budget). Use ONLY on a disposable ' +
+      'test account, NEVER the real account.'
+    )
+    timing = mergeTimingConfig(timing, {
+      active_hours: { start: 0, end: 24 },
+      inter_session_gap: { min: 0, max: 0 },
+      max_actions_per_session: { min: 1000, max: 1000 },
+    })
+  }
+  return timing
+})()
+
+/**
+ * On-disk pacing state for a profile, written on session close and read on
+ * the next session/init — deliberately on disk, not just in-memory, so the
+ * inter-session gap survives a service restart (Canon: a same-day burst of
+ * automated sessions is exactly the pattern that got a real account tagged
+ * `uc=scraping` by LinkedIn's bot detection during 2026-07-08 live testing;
+ * an in-memory-only timestamp would have been silently reset by every
+ * ts-node-dev restart during that same testing, providing zero protection).
+ */
+interface PacingState {
+  /** ISO timestamp of when the previous session's browser context closed. */
+  lastSessionEndedAt: string
+}
+
+function pacingStatePath(session_dir: string): string {
+  return path.join(session_dir, '.mira-pacing.json')
+}
+
+/** Never throws — a missing/corrupt file just means "no prior session". */
+function readPacingState(session_dir: string): PacingState | null {
+  try {
+    const raw = fs.readFileSync(pacingStatePath(session_dir), 'utf8')
+    return JSON.parse(raw) as PacingState
+  } catch {
+    return null
+  }
+}
+
+/** Never throws — a failed write only loses the pacing guarantee for the
+ * next session, it must not crash the (already-succeeded) close operation. */
+function writePacingState(session_dir: string, state: PacingState): void {
+  try {
+    fs.writeFileSync(pacingStatePath(session_dir), JSON.stringify(state, null, 2))
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`[ContextManager] Failed to write pacing state: ${message}`)
+  }
+}
 
 /**
  * ContextManager - Manages the lifecycle of per-profile browser contexts.
@@ -127,8 +315,29 @@ export class ContextManager {
     fs.mkdirSync(session_dir, { recursive: true })
 
     const timing_config = timing_overrides
-      ? mergeTimingConfig(DEFAULT_TIMING, timing_overrides)
-      : DEFAULT_TIMING
+      ? mergeTimingConfig(EFFECTIVE_DEFAULT_TIMING, timing_overrides)
+      : EFFECTIVE_DEFAULT_TIMING
+
+    // Inter-session pacing gate — checked BEFORE launching, using on-disk
+    // state from the PREVIOUS session's close (see PacingState above for why
+    // disk, not memory). A same-day burst of back-to-back sessions is exactly
+    // the usage pattern that got a real account tagged `uc=scraping` by
+    // LinkedIn's bot detection (2026-07-08 live investigation, PENDING.md §2).
+    const pacing = readPacingState(session_dir)
+    if (pacing?.lastSessionEndedAt) {
+      const lastEndedMs = new Date(pacing.lastSessionEndedAt).getTime()
+      const gapMinutes = jitter(timing_config.inter_session_gap)
+      const availableAtMs = lastEndedMs + gapMinutes * 60_000
+      if (!Number.isNaN(lastEndedMs) && Date.now() < availableAtMs) {
+        const waitMinutes = Math.ceil((availableAtMs - Date.now()) / 60_000)
+        throw new Error(
+          `Session pacing: the previous session for profile ${profile_id} ended too ` +
+          `recently. Next session available in ~${waitMinutes} more minute(s) ` +
+          `(around ${new Date(availableAtMs).toLocaleTimeString()}). This gap exists ` +
+          `so MIRA never looks like a bot running back-to-back automated sessions.`
+        )
+      }
+    }
 
     const fingerprint = generateFingerprint(profile_id)
 
@@ -141,27 +350,67 @@ export class ContextManager {
       timing_config,
       last_active: null,
       fingerprint_seed: hashProfileId(profile_id),
+      actions_this_session: 0,
+      // Randomised once per session (not a fixed number) — see recordAction().
+      session_action_budget: jitter(timing_config.max_actions_per_session),
     }
     this.contexts.set(profile_id, profileCtx)
 
     try {
-      console.log(`[ContextManager] Launching browser for profile ${profile_id}`)
+      console.log(`[ContextManager] Launching CloakBrowser for profile ${profile_id}`)
       console.log(`[ContextManager] Session dir: ${session_dir}`)
-      console.log(`[ContextManager] Fingerprint: ${fingerprint.viewport.width}x${fingerprint.viewport.height} ${fingerprint.timezone_id}`)
+      console.log(`[ContextManager] Fingerprint seed: ${profileCtx.fingerprint_seed} (${fingerprint.viewport.width}x${fingerprint.viewport.height} ${fingerprint.timezone_id})`)
 
-      const context = await chromium.launchPersistentContext(session_dir, {
+      // CloakBrowser owns the hard fingerprint surfaces (userAgent, canvas/WebGL/
+      // audio, GPU, WebRTC, automation signals) via its C++ patches, keyed off a
+      // deterministic per-profile seed so the identity is stable across restarts.
+      // We still set honest context-level options (viewport, locale, timezone,
+      // colorScheme) — those don't contradict the patched navigator. We do NOT
+      // pass a hand-rolled userAgent: a UA that disagrees with CloakBrowser's
+      // patched navigator would itself be a detection signal. (generateFingerprint
+      // still supplies the viewport/locale/tz tables; its user_agent field is now
+      // unused here by design.)
+      // NOTE: the exact CloakBrowser launch-option surface (option names, the
+      // --fingerprint arg) is validated blind here — confirm on the first live
+      // run against the test account (H1.4/H1.5) before the real account.
+      const { launchPersistentContext } = await importCloakBrowser()
+      const context = await launchPersistentContext({
+        // CloakBrowser takes a single options object (userDataDir inside it),
+        // unlike Playwright's (userDataDir, options) — see cloakbrowser types.
+        userDataDir: session_dir,
         headless: false,
         viewport: fingerprint.viewport,
-        userAgent: fingerprint.user_agent,
+        // locale/timezone go through CloakBrowser's top-level wrapper fields,
+        // which route to undetectable binary flags. Passing them via Playwright
+        // context options would use detectable CDP emulation (cloakbrowser
+        // strips them there for exactly this reason).
         locale: fingerprint.locale,
         timezoneId: fingerprint.timezone_id,
         colorScheme: fingerprint.color_scheme,
+        // stealthArgs:false → use our deterministic per-profile --fingerprint
+        // seed instead of CloakBrowser's randomized default fingerprint args, so
+        // a profile's identity is stable across restarts. The C++ source-level
+        // patches stay active regardless of this flag.
+        stealthArgs: false,
+        // humanize: CloakBrowser's own mouse/keyboard/scroll humanization —
+        // vendor-tested, more sophisticated than a hand-rolled jitter (see
+        // timing.ts's mouse_jitter field, intentionally superseded, not
+        // separately implemented). 'careful' over 'default': this drives a
+        // real operator's account, not a throwaway — bias toward the more
+        // conservative preset. Added 2026-07-08 after live testing showed
+        // LinkedIn's PerimeterX bot-detection tagging this session's traffic
+        // pattern `uc=scraping` — see PENDING.md §2.
+        humanize: true,
+        humanPreset: 'careful',
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
-          "--disable-blink-features=AutomationControlled",
+          `--fingerprint=${profileCtx.fingerprint_seed}`,
         ],
+        // Binary version intentionally unset → resolves to the free v146 tier.
+        // Do NOT set licenseKey/browserVersion (or the CLOAKBROWSER_LICENSE_KEY
+        // / CLOAKBROWSER_VERSION env vars) without the founder's Pro decision.
       })
 
       profileCtx.context = context as unknown as BrowserContext
@@ -216,6 +465,35 @@ export class ContextManager {
   }
 
   /**
+   * Records that one action was completed in this profile's current session,
+   * and reports whether the session's randomised action budget has now been
+   * reached (in which case the caller — server.ts's /task handler — should
+   * close the profile, forcing a fresh inter_session_gap wait before the next
+   * one). Bounds a session to a human-like burst of activity (8-15 actions by
+   * default) rather than an unbounded run.
+   *
+   * @param profile_id - The profile that just completed an action.
+   * @returns shouldClose (budget reached or profile unknown), plus the
+   *   current count/budget for logging. Safe to call for an unknown
+   *   profile_id — returns shouldClose:false rather than throwing.
+   *
+   * Deterministic: Yes (given prior state). Side Effects: Mutates the
+   * profile's actions_this_session counter.
+   */
+  recordAction(profile_id: string): { shouldClose: boolean; actionsThisSession: number; budget: number } {
+    const profileCtx = this.contexts.get(profile_id)
+    if (!profileCtx) {
+      return { shouldClose: false, actionsThisSession: 0, budget: 0 }
+    }
+    profileCtx.actions_this_session += 1
+    return {
+      shouldClose: profileCtx.actions_this_session >= profileCtx.session_action_budget,
+      actionsThisSession: profileCtx.actions_this_session,
+      budget: profileCtx.session_action_budget,
+    }
+  }
+
+  /**
    * Returns the current SessionStatus for a given profile.
    *
    * Purpose: HTTP-safe status snapshot — does not expose raw BrowserContext.
@@ -262,6 +540,11 @@ export class ContextManager {
       }
     }
 
+    // Record when this session ended so the NEXT initProfile() call can
+    // enforce the inter-session gap — on disk, so it survives a service
+    // restart (see PacingState).
+    writePacingState(profileCtx.session_dir, { lastSessionEndedAt: new Date().toISOString() })
+
     this.contexts.delete(profile_id)
     if (this.activeMutex === profile_id) {
       this.activeMutex = null
@@ -284,6 +567,51 @@ export class ContextManager {
   }
 
   /**
+   * Navigation-free LinkedIn login check: inspects the profile's persistent
+   * cookie jar for a valid `li_at` (LinkedIn's primary auth cookie, the
+   * ground truth for "is this session logged in").
+   *
+   * Why this exists (2026-07-11): the connection check used to piggyback on
+   * read-feed — navigate to the feed, then run auth-wall detection against a
+   * feed-post-container selector that the read-feed code itself notes "won't
+   * reliably match even on a confirmed-rendered, logged-in feed." A slow SPA
+   * render, selector drift, or LinkedIn's `uc=scraping` bot-check serving a
+   * checkpoint all produced a FALSE "not connected" for a user who had in
+   * fact just logged in — the exact symptom a pilot tester hit on every
+   * build. Cookie presence is the authoritative signal and needs zero
+   * LinkedIn navigation, so it also removes the detection surface (and the
+   * action-budget/active-hours cost) of scraping the feed just to check login.
+   *
+   * `li_at` is HttpOnly, so `context.cookies()` (the browser cookie jar, which
+   * includes HttpOnly) sees it even though page JS can't. A present-but-stale
+   * `li_at` (LinkedIn invalidated it server-side while it lingers in the jar)
+   * can still read logged_in:true here — that's an acceptable, far rarer
+   * failure than the current false-negative, and a real scan's own auth-wall
+   * detection catches the stale case at scan time.
+   *
+   * @param profile_id - Profile whose cookie jar to inspect.
+   * @returns LinkedInLoginState with logged_in + a diagnostics bundle (so a
+   *   failure is actionable in a pilot report, not another guess). Never
+   *   throws — a cookie-read failure becomes logged_in:false + reason.
+   *
+   * Side Effects: None (reads the in-memory/on-disk cookie jar; no navigation).
+   */
+  async getLinkedInLoginState(profile_id: string): Promise<LinkedInLoginState> {
+    const profileCtx = this.contexts.get(profile_id)
+    if (!profileCtx || !profileCtx.context) {
+      return { logged_in: false, reason: 'no_context', diagnostics: { context_exists: false } }
+    }
+    try {
+      const cookies = await profileCtx.context.cookies('https://www.linkedin.com')
+      return evaluateLoginCookies(cookies as LoginCookie[], Date.now())
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[ContextManager] Login cookie check failed for ${profile_id}: ${message}`)
+      return { logged_in: false, reason: 'check_error', diagnostics: { context_exists: true, error: message } }
+    }
+  }
+
+  /**
    * Returns the resolved TimingConfig for a profile, or DEFAULT_TIMING if unknown.
    *
    * Purpose: Used by action handlers to apply the correct per-profile timing.
@@ -294,7 +622,7 @@ export class ContextManager {
    * Deterministic: Yes. Side Effects: None.
    */
   getTimingConfig(profile_id: string): TimingConfig {
-    return this.contexts.get(profile_id)?.timing_config ?? DEFAULT_TIMING
+    return this.contexts.get(profile_id)?.timing_config ?? EFFECTIVE_DEFAULT_TIMING
   }
 
   /**

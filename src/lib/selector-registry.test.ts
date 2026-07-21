@@ -11,7 +11,7 @@
  * Side Effects: Writes to stdout. Deterministic: Yes.
  */
 
-import { extractField, type FieldQuery } from './selector-registry'
+import { extractField, LOGIN_CONFIRMED_MARKERS, type FieldQuery } from './selector-registry'
 
 /** Result summary returned by runTests(). */
 export interface TestResult {
@@ -36,6 +36,22 @@ export async function runTests(): Promise<TestResult> {
       console.error(`  FAIL: ${label}`)
       failed++
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Test 0: LOGIN_CONFIRMED_MARKERS must stay obfuscation-resistant.
+  // Live H1.4 validation (2026-07-10) found LinkedIn serving hashed CSS class
+  // names, so a class/id-only logged-in marker (the old `#primary-nav`) never
+  // matched and every quiet/empty feed tripped a false `empty_authed_shell`.
+  // At least one marker must be a bare semantic tag (nav/main/header/...), which
+  // survives class obfuscation, so "are we logged in / is the feed just empty"
+  // stays reliable. Guards against regressing to a class/id-only marker set.
+  // -----------------------------------------------------------------------
+  console.log('\nTest 0: LOGIN_CONFIRMED_MARKERS includes an obfuscation-resistant semantic tag')
+  {
+    const hasSemanticTag = LOGIN_CONFIRMED_MARKERS.some((m) => /^[a-z][a-z0-9]*$/.test(m))
+    assert('at least one bare semantic-tag marker (not only .class/#id)', hasSemanticTag)
+    assert('includes <nav>', (LOGIN_CONFIRMED_MARKERS as readonly string[]).includes('nav'))
   }
 
   // -----------------------------------------------------------------------

@@ -265,6 +265,28 @@ export const INBOX_SELECTORS = {
 } as const
 
 /**
+ * Selector chain for the per-conversation "more options" overflow control on
+ * an OPEN conversation thread (archiveMessage) — reveals a dropdown menu
+ * that contains an "Archive" item, found separately by visible text (see
+ * archive-message.ts) since LinkedIn's menu-item CSS classes churn more
+ * than their visible English labels.
+ *
+ * UNVERIFIED — written blind against no live LinkedIn session, same
+ * starting point as every other selector chain in this file (Canon H1.4).
+ * This is the FIRST-EVER write-action selector in the codebase; expect it
+ * to need at least one live test-account pass before it can be trusted —
+ * do not treat a clean typecheck/unit-test pass as proof this clicks the
+ * right thing on real LinkedIn.
+ */
+export const INBOX_ARCHIVE_SELECTORS = {
+  more_options_button: [
+    'button[aria-label="More options"]',
+    'button.msg-thread-actions__control',
+    '[data-control-name="overflow"]',
+  ] as const,
+} as const
+
+/**
  * Auth-wall / logged-out DOM markers, kept here (not in auth-wall.ts) as they
  * are also selector chains subject to the same live-tuning workflow — see
  * auth-wall.ts for the classification logic that consumes these.
@@ -279,5 +301,39 @@ export const AUTH_WALL_SELECTORS = {
     '#challenge-form',
     '.challenge-dialog',
     'div[data-test-id="challenge-page"]',
+    // Bot-check / CAPTCHA widgets — attribute/id based so they survive the
+    // class-name obfuscation that defeats the three above (2026-07-11: a
+    // PerimeterX bot-check was misread as a quiet feed). px-captcha is
+    // PerimeterX's stable container id; the iframe matches catch embedded
+    // captcha/verification challenges by src/title, not by churny classes.
+    '#px-captcha',
+    '[id*="captcha" i]',
+    'iframe[src*="captcha" i]',
+    'iframe[title*="human" i]',
+    'iframe[title*="verification" i]',
   ] as const,
 } as const
+
+/**
+ * LinkedIn's persistent logged-in site chrome, used ONLY to widen auth-wall
+ * classification's "is there real content / are we logged in" check — never as
+ * a substitute for the per-action content selectors used for actual data
+ * extraction, so extraction-confidence stays honest (Canon H1.4). This is what
+ * lets "are we logged in" stay reliable independent of feed/profile/inbox
+ * selector drift, so a genuinely EMPTY or quiet feed (logged in, but no posts —
+ * e.g. a fresh account with 0 connections) is reported as 0 items, not
+ * misclassified as `empty_authed_shell` ("expired session").
+ *
+ * SEMANTIC, not class-based (changed 2026-07-10). Live H1.4 validation on the
+ * test account found LinkedIn serving this account fully OBFUSCATED, hashed CSS
+ * class names (`_008375bd`, `dec34939`, …) — `#primary-nav`, `artdeco*`,
+ * `feed-shared-update*` and every stable class was ABSENT from the real DOM, so
+ * the old `#primary-nav` marker never matched and every quiet feed tripped a
+ * false `empty_authed_shell`. Semantic HTML survives class obfuscation, so we
+ * anchor on the logged-in app shell's semantic landmarks (`<nav>`, `<main>`)
+ * instead, with `#primary-nav` kept as a fallback for any non-obfuscated
+ * variant. NOTE: this fixes "are we logged in / is the feed just empty" — it
+ * does NOT fix DATA EXTRACTION, which still relies on the (obfuscated-away)
+ * class selectors and needs its own semantic/aria/role-based rework (open H1.4).
+ */
+export const LOGIN_CONFIRMED_MARKERS = ['nav', 'main', '#primary-nav'] as const

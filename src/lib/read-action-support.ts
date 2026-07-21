@@ -67,10 +67,73 @@ export async function detectAuthWall(
 
 async function anySelectorPresent(page: Page, selectors: readonly string[]): Promise<boolean> {
   for (const selector of selectors) {
-    const found = await page.$(selector).then((el) => el !== null).catch(() => false)
+    let found: boolean
+    try {
+      const el = await page.$(selector)
+      found = el !== null
+    } catch (error: unknown) {
+      // Previously silently caught as "not found" — now logged, since a
+      // thrown query (vs. a clean zero-match) would fully explain a false
+      // empty_authed_shell on a confirmed-logged-in page (Canon H1.4
+      // live-DOM investigation, 2026-07-08).
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[anySelectorPresent] page.$() THREW for "${selector}": ${message}`)
+      found = false
+    }
     if (found) return true
   }
   return false
+}
+
+/**
+ * Waits for the page to settle into one of its known states — real content
+ * present, a login-form marker, or a checkpoint/challenge marker — before
+ * `detectAuthWall` classifies it.
+ *
+ * Why this exists: LinkedIn is a client-rendered SPA. `page.goto(..., {
+ * waitUntil: "domcontentloaded" })` fires once the initial HTML document
+ * parses, well before React mounts and fetches feed/profile/inbox content.
+ * Classifying immediately after that (previously: navigate + a fixed
+ * ~1.5-4s human delay) can catch the page mid-load — an empty `id="root"`
+ * shell with none of the real content yet — and misreport it as
+ * `empty_authed_shell` (a "silently expired session") when the operator is
+ * actually logged in and the page simply hasn't finished rendering (Canon
+ * H1.4: selectors/timing were written blind against live LinkedIn).
+ *
+ * Polls for the content selector or the auth-wall marker selectors, instead
+ * of `page.waitForSelector` — observed live against real LinkedIn: the
+ * event-based wait did not reliably fire even when the element demonstrably
+ * appeared in the DOM within the window (confirmed via on-failure snapshots
+ * capturing it moments later). Direct `page.$()` polling matches exactly
+ * what `detectAuthWall` itself uses to check presence, so "waitForPageSettled
+ * says found" and "detectAuthWall says found" can never disagree.
+ *
+ * Never throws — if nothing appears within timeoutMs, it just returns, and
+ * detectAuthWall classifies whatever DOM exists at that point.
+ *
+ * @param page - Active Playwright page, already navigated.
+ * @param primaryContentSelector - The (possibly comma-joined) CSS selector
+ *   for the content the caller is about to extract from.
+ * @param timeoutMs - Max time to wait for a settled state. Default 30s —
+ *   observed live: a cold-started browser (right after session/init) can take
+ *   just over 15s for LinkedIn's nav chrome to mount; 30s gives real margin
+ *   while staying bounded (never hangs).
+ * @param pollIntervalMs - How often to re-check. Default 500ms.
+ */
+export async function waitForPageSettled(
+  page: Page,
+  primaryContentSelector: string,
+  timeoutMs = 30000,
+  pollIntervalMs = 500,
+): Promise<void> {
+  const markerSelectors = [...AUTH_WALL_SELECTORS.login_form, ...AUTH_WALL_SELECTORS.checkpoint_challenge]
+  const selectors = [primaryContentSelector, ...markerSelectors]
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const found = await anySelectorPresent(page, selectors)
+    if (found) return
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+  }
 }
 
 /**

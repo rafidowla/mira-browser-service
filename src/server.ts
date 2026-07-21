@@ -20,8 +20,8 @@
 import 'dotenv/config'
 import express, { Request, Response, NextFunction } from 'express'
 import type { TaskRequest, TaskResponse, AuditEntry, SessionStatus } from './types'
-import { DEFAULT_TIMING } from './lib/timing'
-import { contextManager } from './lib/context'
+import { mergeTimingConfig, isWithinActiveHours } from './lib/timing'
+import { contextManager, EFFECTIVE_DEFAULT_TIMING } from './lib/context'
 import type { TimingConfig } from './lib/timing'
 import { getAuditLog, logAudit } from './lib/audit'
 import { readFeed } from './actions/read-feed'
@@ -30,6 +30,7 @@ import { readProfile } from './actions/read-profile'
 import { readCreatorPosts } from './actions/read-creator-posts'
 import { openUrl } from './actions/open-url'
 import { readInbox } from './actions/read-inbox'
+import { archiveMessage } from './actions/archive-message'
 import type { ExtractionConfidence } from './lib/confidence'
 import type { AuthWallReason } from './lib/auth-wall'
 import { AUTH_WALL_REASON_DETAIL } from './lib/auth-wall'
@@ -137,16 +138,16 @@ function requireToken(req: Request, res: Response, next: NextFunction): void {
 /**
  * GET /timing/defaults
  *
- * Purpose: Returns the DEFAULT_TIMING configuration as JSON.
- * No auth required — transparency is part of the trust model.
- * Operators can inspect exactly what timing cadences MIRA applies
- * to their browser sessions without needing to read source code.
+ * Purpose: Returns the EFFECTIVE default timing configuration as JSON —
+ * DEFAULT_TIMING with any MIRA_ACTIVE_HOURS_* env override applied, so an
+ * operator sees the window that's actually in force, not just the code
+ * default. No auth required — transparency is part of the trust model.
  *
- * Returns: DEFAULT_TIMING object (TimingConfig).
+ * Returns: EFFECTIVE_DEFAULT_TIMING object (TimingConfig).
  * Side Effects: None.
  */
 app.get('/timing/defaults', (_req: Request, res: Response): void => {
-  res.json(DEFAULT_TIMING)
+  res.json(EFFECTIVE_DEFAULT_TIMING)
 })
 
 /**
@@ -163,6 +164,14 @@ app.get('/health', (_req: Request, res: Response): void => {
   })
 })
 
+/** Human-facing message for the active-hours gate, shared by both routes below. */
+function activeHoursMessage(timing: TimingConfig): string {
+  return (
+    `Outside active hours (${timing.active_hours.start}:00–${timing.active_hours.end}:00 local). ` +
+    `MIRA only runs LinkedIn automation during normal daytime hours to avoid an inhuman usage pattern.`
+  )
+}
+
 /**
  * POST /session/init
  *
@@ -178,6 +187,16 @@ app.post('/session/init', requireToken, (req: Request, res: Response): void => {
     res.status(400).json({ error: 'Missing profile_id' })
     return
   }
+
+  // Active-hours gate, checked BEFORE launching — a session starting outside
+  // normal daytime hours is itself an automation tell, independent of what
+  // happens once the browser is open.
+  const effectiveTiming = timing_overrides ? mergeTimingConfig(EFFECTIVE_DEFAULT_TIMING, timing_overrides) : EFFECTIVE_DEFAULT_TIMING
+  if (!isWithinActiveHours(effectiveTiming)) {
+    res.status(403).json({ error: activeHoursMessage(effectiveTiming) })
+    return
+  }
+
   contextManager
     .initProfile(profile_id, timing_overrides)
     .then((ctx) => {
@@ -203,6 +222,35 @@ app.post('/session/status', requireToken, (req: Request, res: Response): void =>
   }
   const status = contextManager.getStatus(profile_id)
   res.json(status)
+})
+
+/**
+ * POST /session/login-check
+ *
+ * Navigation-free LinkedIn login check — inspects the profile's persistent
+ * cookie jar for a valid `li_at`, the authoritative "logged in" signal. This
+ * is NOT a whitelisted LinkedIn action (it never navigates or scrapes
+ * LinkedIn, so it stays cleanly outside the reads-only whitelist / I-6 gate),
+ * and it deliberately does NOT go through /task — so it never consumes the
+ * session action budget and is never blocked by the active-hours gate, unlike
+ * the old read-feed-based connection probe it replaces (2026-07-11).
+ *
+ * Body: { profile_id }
+ * Returns: LinkedInLoginState { logged_in, reason, diagnostics }.
+ */
+app.post('/session/login-check', requireToken, (req: Request, res: Response): void => {
+  const { profile_id } = req.body as { profile_id: string }
+  if (!profile_id) {
+    res.status(400).json({ error: 'Missing profile_id' })
+    return
+  }
+  contextManager
+    .getLinkedInLoginState(profile_id)
+    .then((state) => res.json(state))
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Login check failed'
+      res.status(500).json({ logged_in: false, reason: 'check_error', diagnostics: { context_exists: false, error: message } })
+    })
 })
 
 /**
@@ -268,6 +316,13 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
 
   const timing = contextManager.getTimingConfig(profile_id)
 
+  // Active-hours gate — a task running outside normal daytime hours is an
+  // automation tell on its own, regardless of which action it is.
+  if (!isWithinActiveHours(timing)) {
+    res.status(403).json({ success: false, error: activeHoursMessage(timing) })
+    return
+  }
+
   /**
    * Executes the requested action, logs to audit, and returns TaskResponse.
    * All errors caught and returned as { success: false, error }.
@@ -306,6 +361,21 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
           const url = typeof params.url === 'string' ? params.url : ''
           if (!url) return { success: false, error: 'Missing params.url' }
           const data = await openUrl(profile_id, url, timing)
+          // data.opened can be false (no active context, mutex busy, nav error)
+          // without openUrl() ever throwing — this used to be reported as
+          // success regardless, so the button looked "unresponsive" with no
+          // error shown (confirmed via pilot report 2026-07-10: no window
+          // opened, no message, session had gone stale in the background).
+          if (!data.opened) {
+            logAudit({ profile_id, action, result: 'failure', detail: data.reason })
+            const message =
+              data.reason === 'mutex_blocked'
+                ? 'The browser is busy with another action — try again in a moment.'
+                : data.reason === 'navigation_error'
+                  ? 'Could not load that page in the browser window.'
+                  : 'No active LinkedIn session — connect LinkedIn first, then try again.'
+            return { success: false, error: message, data }
+          }
           logAudit({ profile_id, action, result: 'success' })
           return { success: true, data }
         }
@@ -316,6 +386,32 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
           const limit = typeof params.limit === 'number' ? params.limit : undefined
           const result = await readInbox(profile_id, timing, limit)
           return finishReadAction(profile_id, action, result.conversations, result.confidence, result.auth_wall, result.auth_wall_reason)
+        }
+        case 'archive-message': {
+          // FIRST-EVER write action (Canon I-6 scoped review,
+          // docs/mira-inbox-archive-write-review-2026-07-10.md in the mira
+          // repo, 2026-07-10). Archives one already-flagged-junk inbox
+          // conversation. Human-triggered only — the app calls this once per
+          // conversation in a capped batch, never from a scan/read path.
+          const conversation_url = typeof params.conversation_url === 'string' ? params.conversation_url : ''
+          if (!conversation_url) return { success: false, error: 'Missing params.conversation_url' }
+          const data = await archiveMessage(profile_id, conversation_url, timing)
+          if (!data.archived) {
+            logAudit({ profile_id, action, result: 'failure', detail: data.reason })
+            const message =
+              data.reason === 'mutex_blocked'
+                ? 'The browser is busy with another action — try again in a moment.'
+                : data.reason === 'auth_wall'
+                  ? 'LinkedIn session looks logged out — reconnect, then try again.'
+                  : data.reason === 'control_not_found'
+                    ? "Couldn't find LinkedIn's archive control on this conversation."
+                    : data.reason === 'no_context'
+                      ? 'No active LinkedIn session — connect LinkedIn first, then try again.'
+                      : 'Could not archive this conversation.'
+            return { success: false, error: message, data }
+          }
+          logAudit({ profile_id, action, result: 'success' })
+          return { success: true, data }
         }
         default:
           return { success: false, error: `Unknown action: ${action}` }
@@ -328,7 +424,26 @@ app.post('/task', requireToken, (req: Request, res: Response): void => {
     }
   }
 
-  execute().then((response) => res.json(response)).catch((error: unknown) => {
+  execute().then((response) => {
+    // Bound the session to a human-like burst of activity (Canon: an
+    // unbounded run of automated actions is itself a detection signal).
+    // Every task counts, success or auth-wall/failure — each one drove a
+    // real browser navigation. Once the session's randomised budget is hit,
+    // close it; the next initProfile() then enforces the inter-session gap.
+    const pacing = contextManager.recordAction(profile_id)
+    if (pacing.shouldClose) {
+      console.log(
+        `[server] Profile ${profile_id} reached its session action budget ` +
+        `(${pacing.actionsThisSession}/${pacing.budget}) — closing for pacing.`
+      )
+      contextManager.closeProfile(profile_id).catch((error: unknown) => {
+        console.error(`[server] Failed to auto-close ${profile_id} for pacing: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      res.json({ ...response, session_closed_for_pacing: true })
+      return
+    }
+    res.json(response)
+  }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : 'Task error'
     res.status(500).json({ success: false, error: message })
   })

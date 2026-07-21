@@ -16,9 +16,9 @@
 import type { Page } from 'playwright'
 import { contextManager } from '../lib/context'
 import { humanDelay, jitter, TimingConfig } from '../lib/timing'
-import { extractField, PROFILE_SELECTORS } from '../lib/selector-registry'
+import { extractField, PROFILE_SELECTORS, LOGIN_CONFIRMED_MARKERS } from '../lib/selector-registry'
 import { computeConfidence, shouldSnapshotOnLowConfidence, type ExtractionConfidence, type FieldOutcome } from '../lib/confidence'
-import { detectAuthWall, captureFailureSnapshot } from '../lib/read-action-support'
+import { detectAuthWall, captureFailureSnapshot, waitForPageSettled } from '../lib/read-action-support'
 import type { AuthWallReason } from '../lib/auth-wall'
 
 /** Enrichment data extracted from a LinkedIn public profile page. */
@@ -62,8 +62,15 @@ function emptyProfileFor(target_profile_url: string): LinkedInProfile {
   }
 }
 
-/** Content container used as the "empty authed shell" signal for profile pages. */
-const PROFILE_PRIMARY_CONTAINER = 'main.scaffold-layout__main, .scaffold-layout__main'
+/**
+ * Content container used as the "empty authed shell" signal for profile
+ * pages, widened with LOGIN_CONFIRMED_MARKERS — see read-feed.ts for why.
+ */
+const PROFILE_PRIMARY_CONTAINER = [
+  'main.scaffold-layout__main',
+  '.scaffold-layout__main',
+  ...LOGIN_CONFIRMED_MARKERS,
+].join(', ')
 
 /**
  * Reads a public LinkedIn profile for enrichment data.
@@ -104,7 +111,10 @@ export async function readProfile(
   let page: Page | null = null
   try {
     page = await context.newPage() as unknown as Page
+    // Bring to front — see read-feed.ts for why (avoids background-tab throttling).
+    await page.bringToFront().catch(() => undefined)
     await page.goto(target_profile_url, { waitUntil: "domcontentloaded", timeout: 30000 })
+    await waitForPageSettled(page, PROFILE_PRIMARY_CONTAINER)
     await humanDelay(timing.page_read_delay)
 
     const authWall = await detectAuthWall(page, PROFILE_PRIMARY_CONTAINER)
